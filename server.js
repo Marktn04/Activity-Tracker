@@ -986,19 +986,6 @@ function draw(){
     var w=document.createElement('div');w.className='pw';
     w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'');
     r.appendChild(w);
-    if(p.doing&&st!=='stopped'){var dg=document.createElement('div');dg.className='pdo';dg.textContent=p.doing;r.appendChild(dg)}
-    if(cpData.length){
-      var ch=document.createElement('div');ch.className='chips';
-      cpData.forEach(function(cp){
-        var v=p.visits&&p.visits[cp.id],s=document.createElement('span');
-        s.className='chip'+(v?' done':'')+(p.cp===cp.id?' here':'');
-        s.textContent=(v?'✓ ':'')+(cp.label||cp.name)+(cp.place?' · '+cp.place.replace(' Garden','').replace(' Stadium','').replace(' Court',''):'');
-        if(!v)s.title=cp.name;
-        if(v)s.title=cp.name+' · first arrived '+new Date(v.first).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+(v.count>1?' · '+v.count+' visits':'');
-        ch.appendChild(s);
-      });
-      r.appendChild(ch);
-    }
     r.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
     box.appendChild(r);
   });
