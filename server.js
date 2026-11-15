@@ -986,6 +986,7 @@ function draw(){
     var w=document.createElement('div');w.className='pw';
     w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'');
     r.appendChild(w);
+    if(p.doing&&st!=='stopped'){var dg=document.createElement('div');dg.className='pdo';dg.textContent=p.doing;r.appendChild(dg)}
     r.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
     box.appendChild(r);
   });
