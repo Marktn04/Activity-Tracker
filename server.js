@@ -26,17 +26,119 @@ let dirty = false;
  * spot with "Edit spots" on the host map. Radius = how close counts as "at" the checkpoint. */
 const DEFAULT_CHECKPOINTS = [
   { id: 'drake',    name: 'Drake Stadium',     type: 'FOB Securement',   lat: 34.07165, lng: -118.44842, radius: 90,
-    items: '', source: 'Master map (orange star)' },
+    items: '', source: 'Master map (orange star); ConOps: Final FOB / Mission Debrief' },
   { id: 'sage',     name: 'Sage Hill',         type: 'FC Retrieval',     lat: 34.07452, lng: -118.45549, radius: 100,
-    items: '', source: 'Master map (magenta star)' },
+    items: '', source: 'Master map (magenta star); ConOps: Flight Commander Retrieval' },
   { id: 'cto',      name: 'CTO Court',         type: 'Equipment Pickup', lat: 34.07017, lng: -118.44550, radius: 75,
-    items: 'Ammo Can (drop 1)', source: 'Master map (cyan star); ConOps file 1: Equipment Drop 1 = Ammo Can' },
+    items: '', source: 'Master map (cyan star); ConOps: Operation Last-Mile Airdrop' },
   { id: 'sunken',   name: 'Sunken Garden (S)', type: 'Equipment Pickup', lat: 34.07165, lng: -118.43951, radius: 75,
-    items: 'Med Kit (drop 2)', source: 'Master map (cyan star); ConOps files 1 and 2: Equipment Drop 2 = Med Kit' },
+    items: '', source: 'Master map (cyan star); ConOps: Operation Color Run (Sunken Garden South)' },
   { id: 'sculpt',   name: 'Sculpture Garden',  type: 'Equipment Pickup', lat: 34.07549, lng: -118.43938, radius: 75,
-    items: 'Rucksack & Staff (drop 1)', source: 'Master map (cyan star); ConOps file 2: Equipment Drop 1 = Rucksack & Staff' }
+    items: '', source: 'Master map (cyan star); ConOps: Operation Interlocked' }
 ];
 function cloneCheckpoints() { return JSON.parse(JSON.stringify(DEFAULT_CHECKPOINTS)); }
+
+/* ---------- PURPOSE of each checkpoint, from "Term I LLAB 9 ConOps AY 26-27" (file 3) ----------
+ * HOST / VIEW-ONLY ONLY: this text is never sent to the participants' link.
+ * Kept separate from the saved checkpoint data so editing the wording here and redeploying updates every activity. */
+const PURPOSES = {
+  sunken: {
+    place: 'Sunken Garden', label: 'Ammo cans',
+    headline: 'Picking up AMMO CANS',
+    operation: 'Operation Color Run',
+    gets: '4 ammo cans',
+    time: '~20 min',
+    what: 'Staff playing "local nationals" make the flight do a PT circuit, then a puzzle: move four colour-coded ammo cans between two boxes in the exact order the clues give (carried at a run, a different cadet for each move). Solving it earns the ammo cans.',
+    done: 'Puzzle solved in the right order, then the flight leaves carrying the ammo cans.'
+  },
+  cto: {
+    place: 'CTO Court', label: 'Med kits',
+    headline: 'Picking up MED KITS',
+    operation: 'Operation Last-Mile Airdrop',
+    gets: '1 training med kit',
+    time: '~20 min',
+    what: 'A staff "clinic courier" runs a silent paper-airplane challenge: groups of 4-6 build one plane, one fold each, no talking, then launch it at a 2 m target. When it is done the flight is awarded the med kit.',
+    done: 'Every group built and tested a plane with everyone folding; med kit handed over.'
+  },
+  sculpt: {
+    place: 'Sculpture Garden', label: 'Rucks & staffs',
+    headline: 'Picking up RUCKSACKS and WOODEN STAFFS',
+    operation: 'Operation Interlocked',
+    gets: 'rucksacks + wooden (Huebner) staffs',
+    time: '~25 min',
+    what: 'After a PT circuit, staff playing the "Scubba Tribe" set the "no one left behind" challenge: the whole flight (except the commander, who leads) crosses a course with arms and legs interlocked: 2 minutes to plan, 10 to move. The rucks and staffs are the reward.',
+    done: 'Every cadet crosses the finish line still interlocked; rucks and staffs awarded.'
+  },
+  sage: {
+    place: 'Sage Hill', label: 'Rescue Flt/CC',
+    headline: 'RESCUING the Flight Commander',
+    operation: 'Flight Commander Retrieval',
+    gets: 'their Flight Commander + the final base location (Drake Stadium)',
+    time: '~25 min',
+    what: 'Flights only get sent here after finishing a THIRD equipment stop. Staff playing the commander\'s old training instructor ("OPFOR") put the flight through a 20-minute "perfect" Open Ranks Inspection plus Warrior Knowledge questions. Pass: the commander is released. Fail: the commander is "shot" in a skit but still reveals the final base.',
+    done: 'Inspection finished and the commander has told them the final base is Drake Stadium.'
+  },
+  drake: {
+    place: 'Drake Stadium', label: 'Final base',
+    headline: 'FINAL BASE: handing in the equipment',
+    operation: 'Final FOB, then Mission Debrief',
+    gets: 'safe refuge, but only the FIRST 2 flights are let in',
+    time: 'debrief 1010-1030',
+    what: 'Flights bring EVERYTHING they collected (ammo cans, med kit, ruck, wooden staff) to the guard in exchange for refuge. Capacity is two flights; later flights are turned away. After the mission everyone debriefs here. (Drake Stadium is also where the morning formation starts at 0630.)',
+    done: 'All four items handed in (first two flights win); later, the flight debriefs.'
+  }
+};
+const EQUIP_IDS = ['sunken', 'cto', 'sculpt'];
+
+const MISSION_GUIDE = {
+  title: 'LLAB 9: Operation Change of Command (20 Nov 2026)',
+  sections: [
+    { h: 'The story in 30 seconds', items: [
+      'The Flight Commanders (Flt/CCs) have been "kidnapped" by pretend enemy staff. Each flight, now led by its Deputy Flight Commander, must get its commander back and reach the final base.',
+      'To be let into the final base each flight must carry four items: an ammo can, a med kit, a rucksack and a wooden staff.',
+      'The items are held by staff playing "local nationals" at three stations. Flights earn each item by completing a short challenge there.',
+      'Only the first 2 flights to reach the final base are let in. The mission is a race as well as a task.'
+    ]},
+    { h: 'The five stops (what each marker on the map means)', items: [
+      'Sunken Garden (S): AMMO CANS (Operation Color Run), about 20 min.',
+      'CTO Court: MED KITS (Operation Last-Mile Airdrop), about 20 min.',
+      'Sculpture Garden: RUCKSACKS + WOODEN STAFFS (Operation Interlocked), about 25 min.',
+      'Sage Hill: RESCUE THE FLIGHT COMMANDER (perfect inspection), about 25 min. Flights are only told about this location after their 3rd equipment stop.',
+      'Drake Stadium: FINAL BASE. Hand in all four items. Only 2 flights fit. Also where the mission debrief happens.'
+    ]},
+    { h: 'What a normal flight looks like on your map', items: [
+      'Visits Sunken Garden, CTO Court and Sculpture Garden in any order (all three equipment stops).',
+      'Then Sage Hill (rescue), then Drake Stadium (final base).',
+      'Fastest walking route is about 65 minutes: CTO, Sunken, Sculpture, Sage Hill, Drake (about 3 miles). Flights are told to double-time between stops, and each stop takes about 20 minutes.',
+      'A flight at Sage Hill with fewer than three equipment stops visited, or at Drake without Sage Hill, is out of the expected order. The log flags this in its Purpose line.'
+    ]},
+    { h: 'Why a flight might be somewhere unexpected', items: [
+      'Each flight\'s map shows only 2 of the 3 equipment stops (Alpha and Charlie: Sunken + CTO. Bravo and Delta: Sunken + Sculpture). They must radio other flights to find the third.',
+      'Flights that are far ahead of schedule may be redirected by a planned "inject" to Anderson Court, Inverted Fountain or Court of Sciences. Those are not marked on this map.',
+      'Some flights contain a planted "mole" who may try to steer them wrong or stall.'
+    ]},
+    { h: 'Accountability rules for the tracker (Base Command)', items: [
+      'Order of precedence: SAFETY, then ACCOUNTABILITY, then MISSION, then TIMELINE.',
+      'Flights report their location and destination by radio when moving between stations. Base Command is radio Channel 10 (Flights A to D use Channels 1 to 4).',
+      'Base Command (C/Tran, at the SAC) monitors this app, keeps the accountability spreadsheet, and tells the Deputy Flight Commanders about discrepancies, unaccounted-for personnel or flights that cannot be found.'
+    ]}
+  ],
+  timeline: [
+    ['0600-0620', 'POC dry run at SAC steps'],
+    ['0630-0645', 'Opening formation at Drake Stadium'],
+    ['0645-0705', 'Kidnapping skit, then everyone runs to the SAC'],
+    ['0705-0730', 'Mission brief in the SAC classrooms; flights get their map and radio'],
+    ['0730-0900', 'Equipment pickups (Sunken Garden, CTO Court, Sculpture Garden): about 80-90 min'],
+    ['0850-0955', 'Flight Commander retrieval at Sage Hill: about 45-55 min'],
+    ['by 1010',   'Final base at Drake Stadium (first 2 flights win)'],
+    ['1010-1030', 'Mission debrief at Drake Stadium'],
+    ['1040-1050', 'Closing formation and retreat at Drake Stadium']
+  ]
+};
+function purposeShort(id) {
+  const p = PURPOSES[id];
+  return p ? p.headline + ' (' + p.operation + ')' : '';
+}
 const MAX_LOG = 3000;
 
 /* ---------- persistence (simple JSON snapshot) ---------- */
@@ -132,16 +234,62 @@ function pub(p, host, ev) {
     o.total = Math.round((p.lg && p.lg.total) || 0);
     o.visits = p.visits || {};
     o.where = ev ? statusText(ev, p, null) : '';
+    o.doing = ev ? doingText(ev, p) : '';   // purpose: HOST / VIEW-ONLY ONLY, never in the participant payload
   }
   return o;
+}
+/* Purpose wording for a checkpoint, adapted to how far through the mission this person is. */
+function purposeFor(id, p) {
+  if (!PURPOSES[id]) return '';
+  const others = Object.keys((p && p.visits) || {}).some(k => k !== id);
+  if (id === 'drake' && !others) return 'Start area: the morning formation is held here. It becomes the FINAL BASE once flights have their equipment';
+  return purposeShort(id);
+}
+function doingText(ev, p) {
+  if (p.stopped) return '';
+  if (p.cp && PURPOSES[p.cp]) return purposeFor(p.cp, p);
+  const nc = p.nearCur, pu = nc && PURPOSES[nc.id];
+  return pu ? 'Between stops. Nearest: ' + pu.place + ' (' + pu.label.toLowerCase() + ')' : '';
+}
+/* The "Purpose" line on a log entry, plus a heads-up if the flight seems out of the expected order. */
+function purposeNote(ev, p, type, cpId) {
+  if (!cpId || !PURPOSES[cpId]) return '';
+  let s = purposeFor(cpId, p);
+  const vs = p.visits || {};
+  const eq = EQUIP_IDS.filter(i => vs[i]).length;
+  if (type === 'Arrived') {
+    if (cpId === 'sage' && eq < 3) s += '. HEADS UP: only ' + eq + ' of 3 equipment stops visited so far (flights are normally sent here after the third)';
+    if (cpId === 'drake' && Object.keys(vs).some(k => k !== 'drake')) {
+      const missing = [];
+      if (eq < 3) missing.push('only ' + eq + ' of 3 equipment stops visited');
+      if (!vs.sage) missing.push('Sage Hill (rescue) not visited');
+      s += missing.length ? '. HEADS UP: ' + missing.join('; ') : '. Progress: all 3 equipment stops and the rescue visited';
+    }
+  }
+  return s;
 }
 function broadcastLoc(ev, p, extra) {
   const mk = host => 'event: loc\ndata: ' + JSON.stringify(Object.assign(pub(p, host, ev), extra)) + '\n\n';
   const h = mk(true), g = mk(false);
   for (const c of ev.clients) c.write(c._host ? h : g);
 }
+/* Checkpoints as sent to the HOST / VIEW-ONLY screens (includes the purpose text). Never sent to participants. */
 function pubCps(ev) {
-  return ev.checkpoints.map(c => ({ id: c.id, name: c.name, type: c.type, lat: c.lat, lng: c.lng, radius: c.radius, items: c.items }));
+  return ev.checkpoints.map(c => {
+    const pu = PURPOSES[c.id] || {};
+    return {
+      id: c.id, name: c.name, type: c.type, lat: c.lat, lng: c.lng, radius: c.radius, items: pu.gets || '',
+      place: pu.place || c.name, label: pu.label || c.name, headline: pu.headline || '', operation: pu.operation || '',
+      gets: pu.gets || '', time: pu.time || '', what: pu.what || '', done: pu.done || ''
+    };
+  });
+}
+/* The same, plus the source note, for the spreadsheet's Checkpoints tab. */
+function cpFull(ev) {
+  return pubCps(ev).map(c => {
+    const d = DEFAULT_CHECKPOINTS.find(x => x.id === c.id);
+    return Object.assign(c, { source: d ? d.source : '' });
+  });
 }
 /* ---------- accountability log -> Google Sheet (via Apps Script web app) ---------- */
 const SHEET_URL = process.env.SHEET_WEBHOOK_URL || '';
@@ -208,6 +356,7 @@ function logRow(ev, p, type, moved, checkpointId, tsOverride) {
   };
   if (type === 'Arrived') entry.visit = (p.visits && p.visits[cpId] && p.visits[cpId].count) || 1;
   entry.status = statusText(ev, p, type, entry.checkpoint);
+  entry.purpose = purposeNote(ev, p, type, cpId);   // host / view-only only (the log is never sent to participants)
   entry.text = eventText(type, entry);
   entry.state = type === 'Stopped' ? 'Stopped' : (type === 'Lost signal' ? 'No signal' : 'Sharing');
   ev.log.push(entry);
@@ -216,12 +365,12 @@ function logRow(ev, p, type, moved, checkpointId, tsOverride) {
   if (!SHEET_URL) return;
   // for the spreadsheet's per-person board: the first arrival time at every checkpoint, in checkpoint order
   const visits = ev.checkpoints.map(c => {
-    const v = p.visits && p.visits[c.id];
-    return { name: c.name, first: v ? new Date(v.first).toISOString() : null };
+    const v = p.visits && p.visits[c.id], pu = PURPOSES[c.id];
+    return { name: c.name, label: pu ? pu.label + ' @ ' + pu.place : c.name, first: v ? new Date(v.first).toISOString() : null };
   });
   sheetQ.push(Object.assign({}, entry, {
     ts: new Date(entry.ts).toISOString(), lastSeen: new Date(p.ts || entry.ts).toISOString(),
-    activity: ev.name, activityId: ev.id, visits
+    activity: ev.name, activityId: ev.id, visits, doing: doingText(ev, p)
   }));
   if (sheetQ.length > 5000) sheetQ.splice(0, sheetQ.length - 5000);
 }
@@ -264,7 +413,7 @@ function syncCheckpointsToSheet(ev) {
   if (!SHEET_URL) return;
   clearTimeout(cpTimers.get(ev.id));
   cpTimers.set(ev.id, setTimeout(() => {
-    postSheet({ action: 'checkpoints', activity: ev.name, activityId: ev.id, checkpoints: ev.checkpoints })
+    postSheet({ action: 'checkpoints', activity: ev.name, activityId: ev.id, checkpoints: cpFull(ev), guide: MISSION_GUIDE })
       .catch(e => { console.log('Checkpoint table sync failed, retrying in 60s:', e.message); cpTimers.set(ev.id, setTimeout(() => syncCheckpointsToSheet(ev), 60000)); });
   }, 3000));
 }
@@ -458,6 +607,18 @@ ${BASE_CSS}
 .le{padding:10px 14px;border-bottom:1px solid #1e293b;font-size:15px;line-height:1.35}
 .le .a{color:#94a3b8;font-size:12.5px;margin-top:2px}
 .le .st{color:#7dd3fc;font-size:14px;margin-top:3px;font-weight:600}.le .st.at{color:#4ade80}
+.le .pur{margin-top:4px;font-size:13.5px;color:#e2e8f0;background:#1e293b;border-left:3px solid #a78bfa;padding:5px 9px;border-radius:0 8px 8px 0;line-height:1.35}
+.le .pur b{color:#c4b5fd}.le .pur.warn{border-left-color:#f97316;background:#431407}.le .pur.warn b{color:#fdba74}
+.pc .pdo{margin:5px 0 0 22px;font-size:13px;color:#ddd6fe;font-weight:600}
+.cpop .pup{margin-top:8px;padding-top:7px;border-top:1px solid #e2e8f0}.cpop .ph{font-weight:800;font-size:14px;color:#5b21b6}
+#guidep{position:absolute;inset:0;z-index:3000;background:#0f172a;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+#guideh{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid #1e293b}
+#guideh b{flex:1;font-size:17px}
+#guideb{flex:1;overflow:auto;padding:4px 14px 30px;line-height:1.45}
+#guideb h3{margin:18px 0 6px;font-size:16px;color:#c4b5fd}
+#guideb ul{margin:0;padding-left:20px}#guideb li{margin:5px 0;font-size:15px}
+#guideb .tl{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #1e293b;font-size:15px}
+#guideb .tl span:first-child{flex:none;width:84px;font-weight:700;color:#7dd3fc}
 .le .tag{display:inline-block;font-size:12px;font-weight:700;padding:1px 7px;border-radius:8px;margin-right:6px;background:#334155;color:#e2e8f0}
 .le .tag.Lostsignal{background:#9a3412;color:#ffedd5}.le .tag.Backonline{background:#1e40af;color:#dbeafe}
 .le .tag.Arrived{background:#166534;color:#dcfce7}.le .tag.Left{background:#92400e;color:#fef3c7}.le .tag.Stopped{background:#7f1d1d;color:#fee2e2}
@@ -481,12 +642,17 @@ ${BASE_CSS}
     <button id="fit" class="btn sm sec">Fit all</button>
     <button id="trails" class="btn sm sec">Trails: on</button>
     <button id="logbtn" class="btn sm">Log</button>
+    <button id="guidebtn" class="btn sm sec">Guide</button>
     <button id="spots" class="btn sm sec">Edit spots: off</button>
     <button id="end" class="btn sm danger">End</button>
   </div>
   <div id="sheet">
     <div id="sh"><span id="shl">People</span><span id="chev">&#9662;</span></div>
     <div id="list"></div>
+  </div>
+  <div id="guidep" class="hidden">
+    <div id="guideh"><b id="guidet">Mission guide</b><button id="guidex" class="btn sm">Close</button></div>
+    <div id="guideb"></div>
   </div>
   <div id="smenu" class="hidden">
     <div class="mi">
@@ -607,7 +773,7 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
@@ -631,7 +797,13 @@ function cpPopup(c){
   var d=document.createElement('div');d.className='cpop';
   var b=document.createElement('b');b.textContent=c.name;d.appendChild(b);
   var t=document.createElement('div');t.className='m';t.textContent=c.type+' · radius '+c.radius+' m';d.appendChild(t);
-  if(c.items){var it=document.createElement('div');it.className='m';it.textContent='Equipment: '+c.items;d.appendChild(it)}
+  if(c.headline){
+    var pu=document.createElement('div');pu.className='pup';
+    function line(k,v){if(!v)return;var r=document.createElement('div');r.className='m';var s=document.createElement('b');s.textContent=k+' ';s.style.fontSize='13px';r.appendChild(s);r.appendChild(document.createTextNode(v));pu.appendChild(r)}
+    var hd=document.createElement('div');hd.className='ph';hd.textContent=c.headline;pu.appendChild(hd);
+    line('Activity:',c.operation);line('What happens:',c.what);line('They receive:',c.gets);line('Time:',c.time);line('Done when:',c.done);
+    d.appendChild(pu);
+  }
   if(editMode){
     var w=document.createElement('div');w.style.marginTop='8px';
     var inp=document.createElement('input');inp.type='number';inp.min=10;inp.max=1000;inp.value=c.radius;
@@ -693,6 +865,7 @@ function renderLog(){
     var b=document.createElement('b');b.textContent=e.person;
     d.appendChild(tg);d.appendChild(b);d.appendChild(document.createTextNode(' '+logText(e)));
     if(e.status){var st=document.createElement('div');st.className='st'+(e.type==='Arrived'||/^At /.test(e.status)?' at':'');st.textContent=e.status;d.appendChild(st)}
+    if(e.purpose){var pr=document.createElement('div');pr.className='pur'+(/HEADS UP/.test(e.purpose)?' warn':'');var pl=document.createElement('b');pl.textContent='Purpose: ';pr.appendChild(pl);pr.appendChild(document.createTextNode(e.purpose));d.appendChild(pr)}
     var a=document.createElement('div');a.className='a';
     a.textContent=fmtT(e.ts)+' ('+agoTxt(age(e.ts))+') · walked '+e.total+' m total'+(e.acc?' · ±'+e.acc+' m':'');
     d.appendChild(a);box.appendChild(d);
@@ -710,6 +883,24 @@ $('logbtn').onclick=function(){
   $('logp').classList.remove('hidden');loadLog();
 };
 $('logx').onclick=function(){$('logp').classList.add('hidden')};
+
+/* ---- mission guide (host / view-only only) ---- */
+var guide=null;
+function renderGuide(){
+  var box=$('guideb');box.innerHTML='';
+  if(!guide){box.textContent='The guide is not available yet.';return}
+  $('guidet').textContent=guide.title||'Mission guide';
+  (guide.sections||[]).forEach(function(s){
+    var h=document.createElement('h3');h.textContent=s.h;box.appendChild(h);
+    var ul=document.createElement('ul');(s.items||[]).forEach(function(t){var li=document.createElement('li');li.textContent=t;ul.appendChild(li)});box.appendChild(ul);
+  });
+  var h2=document.createElement('h3');h2.textContent='Timeline (20 Nov)';box.appendChild(h2);
+  (guide.timeline||[]).forEach(function(r){var d=document.createElement('div');d.className='tl';var a=document.createElement('span');a.textContent=r[0];var b=document.createElement('span');b.textContent=r[1];d.appendChild(a);d.appendChild(b);box.appendChild(d)});
+  var h3=document.createElement('h3');h3.textContent='Tip';box.appendChild(h3);
+  var tp=document.createElement('div');tp.textContent='Tap any star on the map to see what happens at that stop. Each person’s card, and every log entry, shows their current purpose.';box.appendChild(tp);
+}
+$('guidebtn').onclick=function(){renderGuide();$('guidep').classList.remove('hidden')};
+$('guidex').onclick=function(){$('guidep').classList.add('hidden')};
 $('logf').onchange=renderLog;
 $('logperson').onchange=renderLog;
 function fillPeople(){
@@ -738,7 +929,7 @@ function connect(){
     $('tname').textContent=d.name;
     Object.keys(people).forEach(function(k){map.removeLayer(people[k].marker);map.removeLayer(people[k].line);delete people[k]});
     d.people.forEach(function(p){upsert(p,false,p.trail||[])});
-    drawCps(d.checkpoints);loadLog();
+    drawCps(d.checkpoints);loadLog();guide=d.guide||guide;
     if(!fitted&&d.people.length){fit();fitted=true}
     else if(!fitted&&cpData.length){map.fitBounds(cpData.map(function(c){return [c.lat,c.lng]}),{padding:[70,70],maxZoom:17})}
     render();
@@ -795,13 +986,15 @@ function draw(){
     var w=document.createElement('div');w.className='pw';
     w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'');
     r.appendChild(w);
+    if(p.doing&&st!=='stopped'){var dg=document.createElement('div');dg.className='pdo';dg.textContent=p.doing;r.appendChild(dg)}
     if(cpData.length){
       var ch=document.createElement('div');ch.className='chips';
       cpData.forEach(function(cp){
         var v=p.visits&&p.visits[cp.id],s=document.createElement('span');
         s.className='chip'+(v?' done':'')+(p.cp===cp.id?' here':'');
-        s.textContent=(v?'✓ ':'')+cp.name;
-        if(v)s.title='First arrived '+new Date(v.first).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+(v.count>1?' · '+v.count+' visits':'');
+        s.textContent=(v?'✓ ':'')+(cp.label||cp.name)+(cp.place?' · '+cp.place.replace(' Garden','').replace(' Stadium','').replace(' Court',''):'');
+        if(!v)s.title=cp.name;
+        if(v)s.title=cp.name+' · first arrived '+new Date(v.first).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+(v.count>1?' · '+v.count+' visits':'');
         ch.appendChild(s);
       });
       r.appendChild(ch);
@@ -1165,7 +1358,7 @@ function api(req, res, id, action, u) {
       .filter(p => host || !p.stopped)
       .map(p => host ? Object.assign(pub(p, true, ev), { trail: (p.trail || []).map(x => [x[0], x[1]]) }) : pub(p, false));
     const snap = { name: ev.name, people, now: Date.now() };
-    if (host) snap.checkpoints = pubCps(ev);
+    if (host) { snap.checkpoints = pubCps(ev); snap.guide = MISSION_GUIDE; }
     res.write('event: snapshot\ndata: ' + JSON.stringify(snap) + '\n\n');
     res._pid = host ? null : spid;
     res._host = host;
@@ -1263,8 +1456,8 @@ function api(req, res, id, action, u) {
     if (!roleOf(ev, t)) return json(res, 403, { error: 'forbidden' });
     if (u.searchParams.get('format') === 'csv') {
       const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
-      const lines = ['Time,Person,What happened,Location status,Event,Checkpoint,Nearest checkpoint,Distance to nearest (m),Closer by (m),Moved (m),Total (m),Accuracy (m),Latitude,Longitude'];
-      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.text || e.type), q(e.status), q(e.type), q(e.checkpoint), q(e.nearest),
+      const lines = ['Time,Person,What happened,Purpose,Location status,Event,Checkpoint,Nearest checkpoint,Distance to nearest (m),Closer by (m),Moved (m),Total (m),Accuracy (m),Latitude,Longitude'];
+      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.text || e.type), q(e.purpose), q(e.status), q(e.type), q(e.checkpoint), q(e.nearest),
         e.nearDist == null ? '' : e.nearDist, e.toward == null ? '' : e.toward, e.moved, e.total, e.acc == null ? '' : e.acc, e.lat, e.lng].join(','));
       res.writeHead(200, {
         'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store',
