@@ -46,6 +46,7 @@ function load() {
     for (const e of raw) {
       events.set(e.id, {
         id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared === true,
+        viewToken: e.viewToken || (dirty = true, crypto.randomBytes(16).toString('hex')),
         checkpoints: Array.isArray(e.checkpoints) ? e.checkpoints : cloneCheckpoints(), log: Array.isArray(e.log) ? e.log : [],
         people: new Map(e.people.map(p => [p.pid, p])), clients: new Set()
       });
@@ -56,7 +57,7 @@ function save(sync) {
   if (!dirty) return;
   dirty = false;
   const out = [...events.values()].map(e => ({
-    id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared,
+    id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared, viewToken: e.viewToken,
     checkpoints: e.checkpoints, log: e.log,
     people: [...e.people.values()]
   }));
@@ -92,6 +93,22 @@ function readJson(req, cb) {
   let b = '', big = false;
   req.on('data', d => { b += d; if (b.length > 4096) { big = true; req.destroy(); } });
   req.on('end', () => { if (big) return; try { cb(null, JSON.parse(b || '{}')); } catch (e) { cb(e); } });
+}
+function safeEq(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+/* 'host' = full control, 'viewer' = view-only (same screens, cannot change or end anything), null = no access */
+function roleOf(ev, t) {
+  if (safeEq(t, ev.token)) return 'host';
+  if (safeEq(t, ev.viewToken)) return 'viewer';
+  return null;
+}
+function viewerManifest(id, tok, name) {
+  return JSON.stringify({
+    name: name ? 'View: ' + name : 'Activity Viewer', short_name: 'Viewer',
+    start_url: '/v/' + id + '/' + tok, scope: '/v/' + id + '/', display: 'standalone',
+    background_color: '#0f172a', theme_color: '#0f172a', icons: ICONS
+  });
 }
 function tokenOk(ev, t) {
   if (!t || typeof t !== 'string' || t.length !== ev.token.length) return false;
@@ -423,6 +440,11 @@ ${BASE_CSS}
 .cpmk{background:none;border:0}
 .cpmk .cplbl{position:absolute;left:50%;top:32px;transform:translateX(-50%);white-space:nowrap;background:rgba(15,23,42,.9);color:#fff;font:700 11px system-ui;padding:1px 6px;border-radius:8px}
 .cpmk svg{display:block;filter:drop-shadow(0 1px 3px rgba(0,0,0,.6))}
+#vbadge{font-size:11px;font-weight:800;letter-spacing:.04em;padding:2px 8px;border-radius:8px;background:#0369a1;color:#e0f2fe}
+#smenu{position:fixed;z-index:2600;top:calc(env(safe-area-inset-top) + 64px);left:10px;right:10px;max-width:440px;background:#0f172a;border:1px solid #334155;border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:14px;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+#smenu .mi{display:flex;flex-direction:column;gap:7px;align-items:flex-start}
+#smenu .mi b{font-size:16px}
+#smenu .mi span{font-size:13px;color:#94a3b8;line-height:1.4}
 .cpop{font:14px system-ui;min-width:170px;color:#0f172a}
 .cpop b{font-size:15px}.cpop .m{color:#475569;font-size:13px;margin-top:2px}
 .cpop input{width:80px;padding:5px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px}
@@ -454,8 +476,8 @@ ${BASE_CSS}
 <div id="app" class="hidden">
   <div id="map"></div>
   <div id="bar">
-    <div id="title"><span id="dot" class="off"></span><span id="tname">Activity</span><span id="cnt" style="font-weight:400;color:#94a3b8"></span></div>
-    <button id="share" class="btn sm">Share link</button>
+    <div id="title"><span id="dot" class="off"></span><span id="tname">Activity</span><span id="vbadge" class="hidden">VIEW ONLY</span><span id="cnt" style="font-weight:400;color:#94a3b8"></span></div>
+    <button id="share" class="btn sm">Share &#9662;</button>
     <button id="fit" class="btn sm sec">Fit all</button>
     <button id="trails" class="btn sm sec">Trails: on</button>
     <button id="logbtn" class="btn sm">Log</button>
@@ -465,6 +487,20 @@ ${BASE_CSS}
   <div id="sheet">
     <div id="sh"><span id="shl">People</span><span id="chev">&#9662;</span></div>
     <div id="list"></div>
+  </div>
+  <div id="smenu" class="hidden">
+    <div class="mi">
+      <b>Link for your group</b>
+      <span>Everyone you send this to taps one button to share their location.</span>
+      <button id="sharep" class="btn sm">Share group link</button>
+    </div>
+    <div class="mi">
+      <b>View-only link</b>
+      <span>Shows this exact map, roster and log on another phone, but can't change or end anything. It reveals everyone's live location, so only send it to people you trust.</span>
+      <button id="sharev" class="btn sm">Share view-only link</button>
+      <button id="newv" class="btn sm sec">Make a new view-only link (old one stops working)</button>
+    </div>
+    <button id="smx" class="btn sm sec">Close</button>
   </div>
   <div id="logp" class="hidden">
     <div id="logh">
@@ -494,12 +530,19 @@ var ev=null, map=null, people={}, es=null, showTrails=true, fitted=false, drawn=
 function lsGet(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 
+// /v/<id>/<token> = view-only link: same screens as the host, but nothing can be changed or ended
+var VIEW=location.pathname.match(/^\/v\/([a-z2-9]{8})\/([0-9a-f]{32})\/?$/);
+function viewerFail(msg){
+  document.body.innerHTML='<div style="min-height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:28px;font:17px system-ui;color:#e2e8f0;background:#0f172a">'+(msg||'This view-only link is no longer valid. The activity may have ended or the host made a new link. Ask the host for the current one.')+'</div>';
+}
 function remember(e){
+  if(VIEW)return;
   lsSet('at_current',e);
   var list=lsGet('at_events',[]).filter(function(x){return x.id!==e.id});
   list.unshift(e); lsSet('at_events',list.slice(0,10));
 }
 function forget(id){
+  if(VIEW)return;
   var list=lsGet('at_events',[]).filter(function(x){return x.id!==id});
   lsSet('at_events',list);
   var c=lsGet('at_current',null); if(c&&c.id===id)lsSet('at_current',null);
@@ -533,14 +576,15 @@ $('mk').onclick=function(){
 
 function open(e){
   ev=e; remember(e);
-  history.replaceState(null,'','#id='+e.id+'&t='+e.token+'&n='+encodeURIComponent(e.name||''));
+  if(!VIEW)history.replaceState(null,'','#id='+e.id+'&t='+e.token+'&n='+encodeURIComponent(e.name||''));
   $('create').classList.add('hidden'); $('app').classList.remove('hidden');
   $('tname').textContent=e.name||'Activity';
   initMap();
   fetch('/api/e/'+e.id+'?t='+e.token).then(function(r){return r.ok?r.json():Promise.reject()}).then(function(d){
-    if(!d.host){toast('Host link invalid');forget(e.id);return showCreate()}
-    $('tname').textContent=d.name; ev.name=d.name; remember(ev); connect();
-  }).catch(function(){toast('Activity not found');forget(e.id);showCreate()});
+    if(VIEW){if(!d.viewer)return viewerFail()}
+    else if(!d.host){toast('Host link invalid');forget(e.id);return showCreate()}
+    $('tname').textContent=d.name; ev.name=d.name; if(d.viewToken)ev.viewToken=d.viewToken; remember(ev); connect();
+  }).catch(function(){if(VIEW)return viewerFail();toast('Activity not found');forget(e.id);showCreate()});
 }
 
 function initMap(){
@@ -715,6 +759,7 @@ function connect(){
     render();
   });
   es.addEventListener('ended',function(){es.close();toast('Activity ended');forget(ev.id)});
+  es.addEventListener('revoked',function(){es.close();viewerFail('The host replaced this view-only link. Ask them for the new one.')});
 }
 
 function fit(){
@@ -773,12 +818,35 @@ $('trails').onclick=function(){
   Object.keys(people).forEach(function(k){showTrails?people[k].line.addTo(map):map.removeLayer(people[k].line)});
 };
 $('sh').onclick=function(){var s=$('sheet');s.classList.toggle('min');$('chev').innerHTML=s.classList.contains('min')?'&#9652;':'&#9662;'};
-$('share').onclick=function(){
-  var link=location.origin+'/e/'+ev.id;
-  if(navigator.share){navigator.share({title:ev.name||'Activity',text:'Tap to share your location for '+(ev.name||'the activity'),url:link}).catch(function(){})}
-  else if(navigator.clipboard){navigator.clipboard.writeText(link).then(function(){toast('Link copied')},function(){prompt('Copy this link',link)})}
-  else prompt('Copy this link',link);
+function shareLink(url,title,text){
+  if(navigator.share){navigator.share({title:title,text:text,url:url}).catch(function(){})}
+  else if(navigator.clipboard){navigator.clipboard.writeText(url).then(function(){toast('Link copied')},function(){prompt('Copy this link',url)})}
+  else prompt('Copy this link',url);
+}
+$('share').onclick=function(){$('smenu').classList.toggle('hidden')};
+$('smx').onclick=function(){$('smenu').classList.add('hidden')};
+$('sharep').onclick=function(){
+  $('smenu').classList.add('hidden');
+  shareLink(location.origin+'/e/'+ev.id,ev.name||'Activity','Tap to share your location for '+(ev.name||'the activity'));
 };
+$('sharev').onclick=function(){
+  if(!ev.viewToken){toast('Not ready yet, try again in a moment');return}
+  $('smenu').classList.add('hidden');
+  shareLink(location.origin+'/v/'+ev.id+'/'+ev.viewToken,'View: '+(ev.name||'Activity'),'View-only map for '+(ev.name||'the activity'));
+};
+$('newv').onclick=function(){
+  if(!confirm('Make a new view-only link? Anyone using the old one is disconnected immediately and you will need to send them the new one.'))return;
+  fetch('/api/e/'+ev.id+'/viewlink?t='+ev.token,{method:'POST'}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(d){
+    ev.viewToken=d.viewToken;remember(ev);toast('New view-only link ready. Tap "Share view-only link" to send it.');
+  }).catch(function(){toast('Could not make a new link')});
+};
+if(VIEW){
+  document.title='Activity Viewer';
+  var ml=document.querySelector('link[rel=manifest]');if(ml)ml.href=location.pathname.replace(/\/$/,'')+'/manifest.webmanifest';
+  ['share','spots','end','smenu'].forEach(function(i){$(i).classList.add('hidden')});
+  $('share').onclick=null;
+  $('vbadge').classList.remove('hidden');
+}
 $('end').onclick=function(){
   if(!confirm('End this activity? Everyone will stop appearing and the data is deleted.'))return;
   fetch('/api/e/'+ev.id+'?t='+ev.token,{method:'DELETE'}).then(function(){
@@ -788,7 +856,7 @@ $('end').onclick=function(){
   });
 };
 
-var start=parseHash()||lsGet('at_current',null);
+var start=VIEW?{id:VIEW[1],token:VIEW[2],name:''}:(parseHash()||lsGet('at_current',null));
 if(start)open(start); else showCreate();
 })();
 </script>
@@ -1066,7 +1134,12 @@ function api(req, res, id, action, u) {
   if (!ev) return json(res, 404, { error: 'not found' });
   const t = u.searchParams.get('t');
 
-  if (!action && m === 'GET') return json(res, 200, { name: ev.name, host: tokenOk(ev, t), shared: ev.shared, logging: !!SHEET_URL });
+  if (!action && m === 'GET') {
+    const role = roleOf(ev, t);
+    const info = { name: ev.name, host: role === 'host', viewer: role === 'viewer', shared: ev.shared, logging: !!SHEET_URL };
+    if (role === 'host') info.viewToken = ev.viewToken;
+    return json(res, 200, info);
+  }
 
   if (!action && m === 'DELETE') {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
@@ -1075,7 +1148,8 @@ function api(req, res, id, action, u) {
   }
 
   if (action === 'stream' && m === 'GET') {
-    const host = tokenOk(ev, t);
+    const role = roleOf(ev, t);
+    const host = role !== null;   // viewers get exactly the host's data
     const spid = String(u.searchParams.get('pid') || '');
     if (!host) {
       // Participants may watch only if the host enabled it AND they are currently sharing themselves.
@@ -1095,6 +1169,7 @@ function api(req, res, id, action, u) {
     res.write('event: snapshot\ndata: ' + JSON.stringify(snap) + '\n\n');
     res._pid = host ? null : spid;
     res._host = host;
+    res._viewer = role === 'viewer';
     ev.clients.add(res);
     const ka = setInterval(() => res.write(': ka\n\n'), 20000);
     req.on('close', () => { clearInterval(ka); ev.clients.delete(res); });
@@ -1185,7 +1260,7 @@ function api(req, res, id, action, u) {
 
   // host only: the in-app log (JSON, or ?format=csv to download)
   if (action === 'log' && m === 'GET') {
-    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    if (!roleOf(ev, t)) return json(res, 403, { error: 'forbidden' });
     if (u.searchParams.get('format') === 'csv') {
       const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
       const lines = ['Time,Person,What happened,Location status,Event,Checkpoint,Nearest checkpoint,Distance to nearest (m),Closer by (m),Moved (m),Total (m),Accuracy (m),Latitude,Longitude'];
@@ -1198,6 +1273,16 @@ function api(req, res, id, action, u) {
       return res.end(lines.join('\n'));
     }
     return json(res, 200, { log: ev.log, checkpoints: pubCps(ev) });
+  }
+
+  // host only: replace the view-only link (the old one stops working at once)
+  if (action === 'viewlink' && m === 'POST') {
+    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    ev.viewToken = crypto.randomBytes(16).toString('hex'); dirty = true;
+    for (const c of [...ev.clients]) {
+      if (c._viewer) { c.write('event: revoked\ndata: {}\n\n'); ev.clients.delete(c); c.end(); }
+    }
+    return json(res, 200, { viewToken: ev.viewToken });
   }
 
   // host only: move a checkpoint / change its radius
@@ -1241,6 +1326,13 @@ const server = http.createServer((req, res) => {
   if (m === 'GET' && p === '/apple-touch-icon.png') return send(res, 'image/png', icon(180), 'public, max-age=86400');
   if (m === 'GET' && p === '/healthz') return send(res, 'text/plain', 'ok');
 
+  // view-only link: serves the host screen; the page switches itself to view-only mode, the server enforces it
+  if (m === 'GET' && (r = p.match(/^\/v\/([a-z2-9]{8})\/([0-9a-f]{32})\/?$/)))
+    return send(res, 'text/html; charset=utf-8', HOST_HTML);
+  if (m === 'GET' && (r = p.match(/^\/v\/([a-z2-9]{8})\/([0-9a-f]{32})\/manifest\.webmanifest$/))) {
+    const ev = events.get(r[1]);
+    return send(res, 'application/manifest+json', viewerManifest(r[1], r[2], ev && ev.name));
+  }
   if (m === 'GET' && (r = p.match(/^\/e\/([a-z2-9]{8})\/?$/)))
     return send(res, 'text/html; charset=utf-8', JOIN_HTML.replace(/__ID__/g, r[1]));
   if (m === 'GET' && (r = p.match(/^\/e\/([a-z2-9]{8})\/manifest\.webmanifest$/))) {
@@ -1256,7 +1348,8 @@ const server = http.createServer((req, res) => {
       let id; do { id = newId(); } while (events.has(id));
       const ev = {
         id, name: String(b.name || 'Activity').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) || 'Activity',
-        token: crypto.randomBytes(16).toString('hex'), created: Date.now(), last: Date.now(),
+        token: crypto.randomBytes(16).toString('hex'), viewToken: crypto.randomBytes(16).toString('hex'),
+        created: Date.now(), last: Date.now(),
         shared: b.shared === true,
         checkpoints: cloneCheckpoints(), log: [],
         people: new Map(), clients: new Set()
@@ -1267,7 +1360,7 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints))?$/))) return api(req, res, r[1], r[2], u);
+  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints|viewlink))?$/))) return api(req, res, r[1], r[2], u);
 
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('Not found');
