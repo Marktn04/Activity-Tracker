@@ -26,7 +26,7 @@ function load() {
     const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     for (const e of raw) {
       events.set(e.id, {
-        id: e.id, name: e.name, token: e.token, created: e.created, last: e.last,
+        id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared === true,
         people: new Map(e.people.map(p => [p.pid, p])), clients: new Set()
       });
     }
@@ -36,7 +36,7 @@ function save() {
   if (!dirty) return;
   dirty = false;
   const out = [...events.values()].map(e => ({
-    id: e.id, name: e.name, token: e.token, created: e.created, last: e.last,
+    id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared,
     people: [...e.people.values()]
   }));
   fs.writeFile(DATA_FILE, JSON.stringify(out), () => {});
@@ -235,6 +235,7 @@ ${BASE_CSS}
   <h1>Activity Tracker</h1>
   <p>Create an activity, share the link, and watch everyone who taps "Share location" appear live on the map.</p>
   <input id="newname" class="in" placeholder="Activity name (e.g. Saturday hike)" maxlength="60">
+  <label style="display:flex;gap:10px;align-items:flex-start;max-width:340px;text-align:left;color:#cbd5e1;font-size:15px"><input id="shared" type="checkbox" checked style="margin-top:3px;width:18px;height:18px"><span>Let people see each other on the map (they can only see others while they are sharing too)</span></label>
   <button id="mk" class="btn">Create activity</button>
   <div id="past"></div>
 </div>
@@ -300,7 +301,7 @@ function showCreate(){
 $('mk').onclick=function(){
   var name=$('newname').value.trim()||'Activity';
   $('mk').disabled=true;
-  fetch('/api/events',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
+  fetch('/api/events',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,shared:$('shared').checked})})
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(d){open({id:d.id,token:d.token,name:name})})
   .catch(function(){toast('Could not create activity');$('mk').disabled=false});
@@ -436,12 +437,13 @@ const JOIN_HTML = String.raw`<!doctype html>
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 ${BASE_CSS}
-body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px;text-align:center;min-height:100%}
+#home{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px;text-align:center;min-height:100%}
 h1{margin:0;font-size:20px;font-weight:600;color:#cbd5e1}
 #name{width:200px;padding:10px 12px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#fff;text-align:center;font-size:16px}
-#go{width:220px;height:220px;border-radius:50%;border:0;background:#3b82f6;color:#fff;font-size:24px;font-weight:700;line-height:1.2;box-shadow:0 0 0 0 rgba(59,130,246,.5);cursor:pointer}
+#go{width:220px;height:220px;border-radius:50%;border:0;background:#3b82f6;color:#fff;font-size:24px;font-weight:700;line-height:1.2;cursor:pointer}
 #go.on{background:#16a34a;animation:pulse 2s infinite}
 #go:disabled{opacity:.5}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(22,163,74,.55)}70%{box-shadow:0 0 0 36px rgba(22,163,74,0)}100%{box-shadow:0 0 0 0 rgba(22,163,74,0)}}
@@ -451,46 +453,100 @@ h1{margin:0;font-size:20px;font-weight:600;color:#cbd5e1}
 .small{font-size:12.5px;color:#64748b;max-width:300px;line-height:1.45}
 #inst{background:none;border:1px solid #334155;color:#94a3b8;border-radius:10px;padding:6px 12px;font-size:13px;cursor:pointer}
 .hidden{display:none!important}
+#live{position:fixed;inset:0;z-index:10}
+#map{position:absolute;inset:0}
+#bar{position:absolute;top:0;left:0;right:0;z-index:1000;padding:calc(env(safe-area-inset-top) + 8px) 10px 22px;background:linear-gradient(#0f172aee,#0f172a00);display:flex;gap:8px;align-items:center;pointer-events:none}
+#bar>*{pointer-events:auto}
+#lst{flex:1;min-width:0;font-weight:600;font-size:15px;display:flex;align-items:center;gap:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#dot{width:9px;height:9px;border-radius:50%;background:#22c55e;flex:none}
+#dot.off{background:#ef4444}
+.b{padding:8px 12px;border-radius:10px;border:1px solid #334155;background:#1e293bf0;color:#e2e8f0;font-size:14px;font-weight:600;cursor:pointer}
+.b.red{background:#7f1d1d;border-color:#7f1d1d}
+.mk .pin{position:absolute;width:30px;height:30px;border-radius:50%;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;color:#fff;font:700 13px system-ui;transform:translate(-50%,-50%)}
+.mk .lbl{position:absolute;transform:translate(-50%,0);top:18px;white-space:nowrap;background:rgba(15,23,42,.88);color:#fff;font:600 11px system-ui;padding:1px 6px;border-radius:8px}
+.mk.me .pin{box-shadow:0 0 0 4px rgba(59,130,246,.5),0 1px 6px rgba(0,0,0,.5)}
+.mk.stale .pin{filter:grayscale(1);opacity:.65}
 </style>
 </head><body>
-<h1 id="ev">&nbsp;</h1>
-<input id="name" placeholder="Your name" maxlength="40" autocomplete="given-name">
-<button id="go" disabled>Share<br>location</button>
-<div id="st"></div>
-<button id="stop" class="hidden">Stop sharing</button>
-<div class="small" id="note">The host of this activity will see your live location on a map while you share. You can stop at any time.</div>
-<button id="inst" class="hidden">Install app</button>
-<div class="small hidden" id="ios">To install: tap Share, then "Add to Home Screen".</div>
+<div id="home">
+  <h1 id="ev">&nbsp;</h1>
+  <input id="name" placeholder="Your name" maxlength="40" autocomplete="given-name">
+  <button id="go" disabled>Share<br>location</button>
+  <div id="st"></div>
+  <button id="stop" class="hidden">Stop sharing</button>
+  <div class="small" id="note">The host of this activity will see your live location on a map while you share. You can stop at any time.</div>
+  <button id="inst" class="hidden">Install app</button>
+  <div class="small hidden" id="ios">To install: tap Share, then "Add to Home Screen".</div>
+</div>
+<div id="live" class="hidden">
+  <div id="map"></div>
+  <div id="bar">
+    <div id="lst"><span id="dot" class="off"></span><span id="lt">Sharing</span></div>
+    <button id="fit" class="b">Fit all</button>
+    <button id="stop2" class="b red">Stop</button>
+  </div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function(){
 var ID='__ID__';
 var $=function(i){return document.getElementById(i)};
 function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function color(p){var h=0;for(var i=0;i<p.length;i++)h=(h*31+p.charCodeAt(i))>>>0;return 'hsl('+(h%360)+',70%,45%)'}
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});
 
 var pid=lsGet('at_pid_'+ID);
 if(!pid){pid=(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+Date.now()).replace(/[^A-Za-z0-9_-]/g,'').slice(0,32);lsSet('at_pid_'+ID,pid)}
 $('name').value=lsGet('at_name')||'';
 
-var sharing=false, watchId=null, lastPos=null, lastSent=0, wl=null, hb=null, offline=false;
+var sharing=false, watchId=null, lastPos=null, lastSent=0, wl=null, hb=null, offline=false, shared=false;
+var map=null, ppl={}, es=null, fitted=false, audio=null;
+var NOTE_HOST='The host of this activity will see your live location on a map while you share. You can stop at any time.';
+var NOTE_ALL='Everyone who is sharing in this activity can see each other’s live location on a map, including the host. You can stop at any time.';
 function status(t,err){$('st').textContent=t;$('st').className=err?'err':''}
 
 fetch('/api/e/'+ID).then(function(r){return r.ok?r.json():Promise.reject()}).then(function(d){
+  shared=!!d.shared;
+  $('note').textContent=shared?NOTE_ALL:NOTE_HOST;
   $('ev').textContent=d.name; document.title=d.name; $('go').disabled=false;
   if(lsGet('at_sharing_'+ID)==='1')startSharing(true);
 }).catch(function(){$('ev').textContent='Activity not found';status('This link is no longer active.',true)});
 
+/* ---- keep-alive: near-silent looping audio + media session (best effort, see README) ---- */
+function wav(){
+  var n=8000,b=new Uint8Array(44+n),v=new DataView(b.buffer);
+  function s(o,t){for(var i=0;i<t.length;i++)b[o+i]=t.charCodeAt(i)}
+  s(0,'RIFF');v.setUint32(4,36+n,true);s(8,'WAVE');s(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,8000,true);v.setUint32(28,8000,true);v.setUint16(32,1,true);v.setUint16(34,8,true);s(36,'data');v.setUint32(40,n,true);
+  for(var i=0;i<n;i++)b[44+i]=(Math.floor(i/50)%2)?129:127;
+  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
+}
+function keepAlive(on){
+  try{
+    if(on){
+      if(!audio){audio=new Audio(wav());audio.loop=true;audio.volume=0.05}
+      var pr=audio.play(); if(pr&&pr.catch)pr.catch(function(){});
+      if('mediaSession' in navigator&&window.MediaMetadata){
+        navigator.mediaSession.metadata=new MediaMetadata({title:'Sharing your location',artist:'Tap Stop in the app to end'});
+        try{navigator.mediaSession.setActionHandler('pause',function(){if(audio)audio.play()})}catch(e){}
+      }
+    } else if(audio){audio.pause()}
+  }catch(e){}
+}
+
+/* ---- sending my position ---- */
 function send(pos){
   var body=JSON.stringify({pid:pid,name:($('name').value||'').trim()||'Guest',lat:pos.lat,lng:pos.lng,acc:pos.acc});
   fetch('/api/e/'+ID+'/loc',{method:'POST',headers:{'Content-Type':'application/json'},body:body,keepalive:true})
   .then(function(r){
     if(r.status===404){stopSharing(true);$('ev').textContent='Activity ended';status('The host ended this activity.');return}
     if(!r.ok)throw 0; lastSent=Date.now(); offline=false; showOk();
-  }).catch(function(){offline=true;status('No connection. Will keep trying...',true)});
+    if(sharing&&shared&&!es)enterLive();
+  }).catch(function(){offline=true;status('No connection. Will keep trying...',true);$('dot').className='off'});
 }
 function showOk(){ if(sharing&&!offline)status('Sharing your location'+(lastPos&&lastPos.acc?' (±'+Math.round(lastPos.acc)+'m)':'')) }
-
 function onPos(p){
   lastPos={lat:p.coords.latitude,lng:p.coords.longitude,acc:Math.round(p.coords.accuracy||0)};
   if(Date.now()-lastSent>=4000)send(lastPos);
@@ -507,15 +563,75 @@ function getWake(){
   if(!sharing||!('wakeLock' in navigator))return;
   navigator.wakeLock.request('screen').then(function(l){wl=l;l.addEventListener('release',function(){wl=null})}).catch(function(){});
 }
+
+/* ---- live map of everyone (only when the host enabled it) ---- */
+function iconFor(p){
+  var me=p.pid===pid, ini=esc((p.name||'?').trim().charAt(0).toUpperCase()||'?');
+  var html='<div class="pin" style="background:'+color(p.pid)+'">'+ini+'</div><div class="lbl">'+esc(p.name)+(me?' (you)':'')+'</div>';
+  var stale=(Date.now()+skew-p.ts)>90000;
+  return L.divIcon({className:'mk'+(me?' me':'')+(stale?' stale':''),html:html,iconSize:[0,0]});
+}
+var skew=0;
+function upsert(d){
+  var p=ppl[d.pid];
+  if(!p){p=ppl[d.pid]={pid:d.pid};p.marker=L.marker([d.lat,d.lng],{icon:iconFor(d)}).addTo(map)}
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.ts=d.ts;
+  p.marker.setLatLng([d.lat,d.lng]);p.marker.setIcon(iconFor(p));
+}
+function drop(pidX){if(ppl[pidX]){map.removeLayer(ppl[pidX].marker);delete ppl[pidX]}}
+function clearAll(){Object.keys(ppl).forEach(drop)}
+function count(){var n=Object.keys(ppl).length;$('lt').textContent='Sharing live · '+n+' on map'}
+function fit(){
+  var pts=Object.keys(ppl).map(function(k){return [ppl[k].lat,ppl[k].lng]});
+  if(!pts.length)return;
+  if(pts.length===1)map.setView(pts[0],16);else map.fitBounds(pts,{padding:[70,70],maxZoom:17});
+}
+function enterLive(){
+  if(!window.L)return;
+  $('home').classList.add('hidden');$('live').classList.remove('hidden');
+  if(!map){
+    map=L.map('map',{zoomControl:false}).setView([20,0],2);
+    L.control.zoom({position:'bottomright'}).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
+  } else setTimeout(function(){map.invalidateSize()},50);
+  connect();
+}
+function leaveLive(){
+  if(es){es.close();es=null}
+  clearAll();fitted=false;
+  $('live').classList.add('hidden');$('home').classList.remove('hidden');
+}
+function connect(){
+  if(es)es.close();
+  es=new EventSource('/api/e/'+ID+'/stream?pid='+encodeURIComponent(pid));
+  es.onopen=function(){$('dot').className=''};
+  es.onerror=function(){$('dot').className='off'};
+  es.addEventListener('snapshot',function(m){
+    var d=JSON.parse(m.data);skew=d.now-Date.now();clearAll();
+    d.people.forEach(upsert);
+    if(!fitted&&d.people.length){fit();fitted=true}
+    count();
+  });
+  es.addEventListener('loc',function(m){
+    var d=JSON.parse(m.data);skew=d.now-Date.now();
+    if(d.stopped)drop(d.pid);else upsert(d);
+    if(!fitted){fit();fitted=true}
+    count();
+  });
+  es.addEventListener('ended',function(){stopSharing(true);$('ev').textContent='Activity ended';status('The host ended this activity.')});
+}
+setInterval(function(){if(map)Object.keys(ppl).forEach(function(k){ppl[k].marker.setIcon(iconFor(ppl[k]))})},5000);
+
+/* ---- start / stop ---- */
 function startSharing(auto){
   if(!navigator.geolocation){status('This device does not support location.',true);return}
   var nm=($('name').value||'').trim(); lsSet('at_name',nm);
   sharing=true; lsSet('at_sharing_'+ID,'1');
   $('go').classList.add('on'); $('go').innerHTML='Sharing<br>live'; $('go').disabled=true;
   $('stop').classList.remove('hidden'); $('name').classList.add('hidden');
-  $('note').textContent='Keep this app open and your screen on. Locking your phone or switching apps can pause sharing.';
+  $('note').textContent='Keep this app open. For best results leave the screen on (you can dim it). Locking your phone can pause sharing.';
   status(auto?'Resuming...':'Getting your location...');
-  watch(); getWake();
+  watch(); getWake(); keepAlive(true);
   clearInterval(hb);
   hb=setInterval(function(){ if(sharing&&lastPos&&Date.now()-lastSent>12000)send(lastPos) },5000);
 }
@@ -523,20 +639,27 @@ function stopSharing(quiet){
   var was=sharing; sharing=false; lsSet('at_sharing_'+ID,'0');
   if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null}
   clearInterval(hb); if(wl){wl.release().catch(function(){});wl=null}
+  keepAlive(false); leaveLive();
   $('go').classList.remove('on'); $('go').innerHTML='Share<br>location'; $('go').disabled=false;
   $('stop').classList.add('hidden'); $('name').classList.remove('hidden');
-  $('note').textContent='The host of this activity will see your live location on a map while you share. You can stop at any time.';
+  $('note').textContent=shared?NOTE_ALL:NOTE_HOST;
   if(was&&!quiet)status('Stopped sharing.');
   if(was)fetch('/api/e/'+ID+'/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:pid}),keepalive:true}).catch(function(){});
 }
 $('go').onclick=function(){startSharing(false)};
 $('stop').onclick=function(){stopSharing(false)};
+$('stop2').onclick=function(){stopSharing(false)};
+$('fit').onclick=fit;
 $('name').addEventListener('change',function(){lsSet('at_name',($('name').value||'').trim())});
 
-document.addEventListener('visibilitychange',function(){
-  if(document.visibilityState==='visible'&&sharing){getWake();watch();if(lastPos)send(lastPos)}
-});
-window.addEventListener('online',function(){if(sharing&&lastPos)send(lastPos)});
+function resume(){
+  if(!sharing)return;
+  getWake();watch();keepAlive(true);
+  if(lastPos)send(lastPos);
+  if(shared&&map&&(!es||es.readyState===2))connect();
+}
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')resume()});
+window.addEventListener('online',resume);
 
 var dp=null;
 window.addEventListener('beforeinstallprompt',function(e){e.preventDefault();dp=e;$('inst').classList.remove('hidden')});
@@ -554,7 +677,7 @@ function api(req, res, id, action, u) {
   if (!ev) return json(res, 404, { error: 'not found' });
   const t = u.searchParams.get('t');
 
-  if (!action && m === 'GET') return json(res, 200, { name: ev.name, host: tokenOk(ev, t) });
+  if (!action && m === 'GET') return json(res, 200, { name: ev.name, host: tokenOk(ev, t), shared: ev.shared });
 
   if (!action && m === 'DELETE') {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
@@ -563,14 +686,23 @@ function api(req, res, id, action, u) {
   }
 
   if (action === 'stream' && m === 'GET') {
-    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    const host = tokenOk(ev, t);
+    const spid = String(u.searchParams.get('pid') || '');
+    if (!host) {
+      // Participants may watch only if the host enabled it AND they are currently sharing themselves.
+      const sp = ev.shared && ev.people.get(spid);
+      if (!sp || sp.stopped) return json(res, 403, { error: 'forbidden' });
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'
     });
     res.write('retry: 3000\n\n');
-    const people = [...ev.people.values()].map(p => Object.assign(pub(p), { trail: (p.trail || []).map(x => [x[0], x[1]]) }));
+    const people = [...ev.people.values()]
+      .filter(p => host || !p.stopped)
+      .map(p => host ? Object.assign(pub(p), { trail: (p.trail || []).map(x => [x[0], x[1]]) }) : pub(p));
     res.write('event: snapshot\ndata: ' + JSON.stringify({ name: ev.name, people, now: Date.now() }) + '\n\n');
+    res._pid = host ? null : spid;
     ev.clients.add(res);
     const ka = setInterval(() => res.write(': ka\n\n'), 20000);
     req.on('close', () => { clearInterval(ka); ev.clients.delete(res); });
@@ -615,6 +747,8 @@ function api(req, res, id, action, u) {
       if (p && p.lat !== undefined) {
         p.stopped = true; ev.last = Date.now(); dirty = true;
         broadcast(ev, 'loc', Object.assign(pub(p), { pt: false, now: Date.now() }));
+        // someone who stops sharing also stops seeing everyone else
+        for (const c of [...ev.clients]) if (c._pid === p.pid) { ev.clients.delete(c); c.end(); }
       }
       res.writeHead(204); res.end();
     });
@@ -654,6 +788,7 @@ const server = http.createServer((req, res) => {
       const ev = {
         id, name: String(b.name || 'Activity').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) || 'Activity',
         token: crypto.randomBytes(16).toString('hex'), created: Date.now(), last: Date.now(),
+        shared: b.shared === true,
         people: new Map(), clients: new Set()
       };
       events.set(id, ev); dirty = true;
