@@ -107,13 +107,19 @@ function endEvent(ev) {
   ev.clients.clear();
 }
 // Checkpoint info (which checkpoint someone is at) is for the host only.
-function pub(p, host) {
+function pub(p, host, ev) {
   const o = { pid: p.pid, name: p.name, lat: p.lat, lng: p.lng, acc: p.acc, ts: p.ts, stopped: !!p.stopped };
-  if (host) o.cp = p.cp || null;
+  if (host) {
+    o.cp = p.cp || null;
+    o.lost = !!p.lost;
+    o.total = Math.round((p.lg && p.lg.total) || 0);
+    o.visits = p.visits || {};
+    o.where = ev ? statusText(ev, p, null) : '';
+  }
   return o;
 }
 function broadcastLoc(ev, p, extra) {
-  const mk = host => 'event: loc\ndata: ' + JSON.stringify(Object.assign(pub(p, host), extra)) + '\n\n';
+  const mk = host => 'event: loc\ndata: ' + JSON.stringify(Object.assign(pub(p, host, ev), extra)) + '\n\n';
   const h = mk(true), g = mk(false);
   for (const c of ev.clients) c.write(c._host ? h : g);
 }
@@ -156,24 +162,66 @@ function statusText(ev, p, type, checkpoint) {
   else if (nc.toward < 0) s += ' (farther by ' + (-nc.toward) + ' m)';
   return s;
 }
+const LOST_MS = Number(process.env.LOST_MS) || 120000;  // no update for this long while "sharing" = "No signal"
+function personState(p) { return p.stopped ? 'Stopped' : (p.lost ? 'No signal' : 'Sharing'); }
+/* Plain-English sentence for an event (no name; the person has their own column). */
+function eventText(type, entry) {
+  switch (type) {
+    case 'Arrived': return entry.visit > 1 ? 'Arrived at ' + entry.checkpoint + ' again (visit ' + entry.visit + ')' : 'Arrived at ' + entry.checkpoint;
+    case 'Left': return 'Left ' + entry.checkpoint;
+    case 'Moved': return 'Moved ' + entry.moved + ' m';
+    case 'Joined': return 'Started sharing location';
+    case 'Resumed': return 'Resumed sharing location';
+    case 'Stopped': return 'Stopped sharing location';
+    case 'Lost signal': return 'No location update for 2+ minutes';
+    case 'Back online': return 'Location updates are back';
+    default: return 'Standing still';
+  }
+}
 /* One event -> the in-app log (host panel) AND the spreadsheet queue. checkpointId: the checkpoint it is about. */
-function logRow(ev, p, type, moved, checkpointId) {
+function logRow(ev, p, type, moved, checkpointId, tsOverride) {
   const nc = p.nearCur;
+  const cpId = checkpointId !== undefined ? checkpointId : p.cp;
   const entry = {
-    ts: p.ts || Date.now(), pid: p.pid, person: p.name, type,
-    checkpoint: cpName(ev, checkpointId !== undefined ? checkpointId : p.cp),
+    ts: tsOverride || p.ts || Date.now(), pid: p.pid, person: p.name, type,
+    checkpoint: cpName(ev, cpId),
     lat: p.lat, lng: p.lng, acc: p.acc,
     moved: Math.round(moved || 0), total: Math.round((p.lg && p.lg.total) || 0),
     nearest: nc ? nc.name : '', nearDist: nc ? nc.d : null, toward: nc ? nc.toward : null
   };
+  if (type === 'Arrived') entry.visit = (p.visits && p.visits[cpId] && p.visits[cpId].count) || 1;
   entry.status = statusText(ev, p, type, entry.checkpoint);
+  entry.text = eventText(type, entry);
+  entry.state = type === 'Stopped' ? 'Stopped' : (type === 'Lost signal' ? 'No signal' : 'Sharing');
   ev.log.push(entry);
   if (ev.log.length > MAX_LOG) ev.log.splice(0, ev.log.length - MAX_LOG);
   broadcast(ev, 'log', entry, true);
   if (!SHEET_URL) return;
-  sheetQ.push(Object.assign({}, entry, { ts: new Date(entry.ts).toISOString(), activity: ev.name, activityId: ev.id }));
+  // for the spreadsheet's per-person board: the first arrival time at every checkpoint, in checkpoint order
+  const visits = ev.checkpoints.map(c => {
+    const v = p.visits && p.visits[c.id];
+    return { name: c.name, first: v ? new Date(v.first).toISOString() : null };
+  });
+  sheetQ.push(Object.assign({}, entry, {
+    ts: new Date(entry.ts).toISOString(), lastSeen: new Date(p.ts || entry.ts).toISOString(),
+    activity: ev.name, activityId: ev.id, visits
+  }));
   if (sheetQ.length > 5000) sheetQ.splice(0, sheetQ.length - 5000);
 }
+/* "No signal" watchdog: a person who is sharing but silent for LOST_MS gets flagged once, until updates resume. */
+setInterval(() => {
+  const now = Date.now();
+  for (const ev of events.values()) {
+    for (const p of ev.people.values()) {
+      if (p.stopped || p.lost || p.lat === undefined || !p.ts) continue;
+      if (now - p.ts > LOST_MS && now - p.ts < 6 * 3600000) {
+        p.lost = true; dirty = true;
+        logRow(ev, p, 'Lost signal', 0, p.cp, now);
+        broadcastLoc(ev, p, { pt: false, now });
+      }
+    }
+  }
+}, 15000).unref();
 /* Which checkpoint is this position in? Leaving needs 15% extra distance so GPS jitter at the edge doesn't flap. */
 function cpAt(ev, p, lat, lng) {
   const cur = p.cp && ev.checkpoints.find(c => c.id === p.cp);
@@ -343,7 +391,22 @@ ${BASE_CSS}
 #title{font-weight:700;font-size:16px;flex:1 1 100%;display:flex;align-items:center;gap:8px}
 #dot{width:9px;height:9px;border-radius:50%;background:#22c55e;display:inline-block}
 #dot.off{background:#ef4444}
-#sheet{position:absolute;left:0;right:0;bottom:0;z-index:1000;background:#0f172af2;border-radius:18px 18px 0 0;max-height:42vh;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
+.pc{padding:10px 10px 11px;border-top:1px solid #1e293b;cursor:pointer;border-left:4px solid transparent}
+.pc.lost{border-left-color:#f97316;background:#431407aa}
+.pc.at{border-left-color:#22c55e}
+.pc.enroute{border-left-color:#38bdf8}
+.pc.stopped{border-left-color:#64748b;opacity:.7}
+.pc .pt{display:flex;align-items:center;gap:8px}
+.pc .c{width:14px;height:14px;border-radius:50%;flex:none}
+.pc .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;font-size:16px}
+.pc .bd{flex:none;font-size:12.5px;font-weight:700;padding:2px 9px;border-radius:10px;background:#334155}
+.pc.at .bd{background:#166534;color:#dcfce7}.pc.enroute .bd{background:#075985;color:#e0f2fe}.pc.lost .bd{background:#c2410c;color:#fff}
+.pc .pw{font-size:13px;color:#94a3b8;margin:3px 0 0 22px}
+.pc .chips{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0 0 22px}
+.chip{font-size:11.5px;padding:2px 8px;border-radius:9px;border:1px solid #334155;color:#64748b}
+.chip.done{background:#14532d;border-color:#166534;color:#bbf7d0;font-weight:600}
+.chip.here{outline:2px solid #4ade80}
+#sheet{position:absolute;left:0;right:0;bottom:0;z-index:1000;background:#0f172af2;border-radius:18px 18px 0 0;max-height:52vh;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
 #sheet.min #list{display:none}
 #sh{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;font-weight:600}
 #list{overflow:auto;padding:0 8px 8px}
@@ -374,6 +437,7 @@ ${BASE_CSS}
 .le .a{color:#94a3b8;font-size:12.5px;margin-top:2px}
 .le .st{color:#7dd3fc;font-size:14px;margin-top:3px;font-weight:600}.le .st.at{color:#4ade80}
 .le .tag{display:inline-block;font-size:12px;font-weight:700;padding:1px 7px;border-radius:8px;margin-right:6px;background:#334155;color:#e2e8f0}
+.le .tag.Lostsignal{background:#9a3412;color:#ffedd5}.le .tag.Backonline{background:#1e40af;color:#dbeafe}
 .le .tag.Arrived{background:#166534;color:#dcfce7}.le .tag.Left{background:#92400e;color:#fef3c7}.le .tag.Stopped{background:#7f1d1d;color:#fee2e2}
 #toast{position:absolute;left:50%;top:90px;transform:translateX(-50%);z-index:2000;background:#111827;color:#fff;padding:8px 14px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.on{opacity:1}
@@ -405,7 +469,8 @@ ${BASE_CSS}
   <div id="logp" class="hidden">
     <div id="logh">
       <b>Activity log <span id="logn" style="font-weight:400;color:#94a3b8;font-size:14px"></span></b>
-      <select id="logf"><option value="all">Everything</option><option value="cp">Checkpoints only</option></select>
+      <select id="logperson"><option value="">Everyone</option></select>
+      <select id="logf"><option value="all">All events</option><option value="cp">Checkpoints only</option><option value="problems">Problems (no signal / stopped)</option></select>
       <a id="logcsv" class="btn sm sec" href="#">Download CSV</a>
       <button id="logx" class="btn sm">Close</button>
     </div>
@@ -498,7 +563,7 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
@@ -554,30 +619,38 @@ var logData=[];
 function fmtT(ts){return new Date(ts).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
 function logText(e){
   switch(e.type){
-    case 'Arrived':return 'arrived at '+e.checkpoint;
+    case 'Arrived':return e.visit>1?'arrived at '+e.checkpoint+' again (visit '+e.visit+')':'arrived at '+e.checkpoint;
     case 'Left':return 'left '+e.checkpoint;
     case 'Moved':return 'moved '+e.moved+' m'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Joined':return 'started sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Resumed':return 'resumed sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    case 'Lost signal':return 'has no signal (no update for 2+ min)';
+    case 'Back online':return 'is back online';
     case 'Stopped':return 'stopped sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     default:return 'still here'+(e.checkpoint?' at '+e.checkpoint:'');
   }
 }
 function renderLog(){
   if($('logp').classList.contains('hidden'))return;
-  var only=$('logf').value==='cp';
-  var rows=logData.filter(function(e){return !only||e.type==='Arrived'||e.type==='Left'});
+  fillPeople();
+  var f=$('logf').value,who=$('logperson').value;
+  var rows=logData.filter(function(e){
+    if(who&&e.pid!==who)return false;
+    if(f==='cp')return e.type==='Arrived'||e.type==='Left';
+    if(f==='problems')return e.type==='Lost signal'||e.type==='Back online'||e.type==='Stopped';
+    return true;
+  });
   $('logn').textContent='('+rows.length+')';
   var box=$('logl');box.innerHTML='';
   if(!rows.length){var em=document.createElement('div');em.className='empty';em.textContent='Nothing logged yet.';box.appendChild(em);return}
   for(var i=rows.length-1,n=0;i>=0&&n<500;i--,n++){
     var e=rows[i],d=document.createElement('div');d.className='le';
-    var tg=document.createElement('span');tg.className='tag '+e.type;tg.textContent=e.type==='Update'?'Here':e.type;
+    var tg=document.createElement('span');tg.className='tag '+e.type.replace(/ /g,'');tg.textContent=e.type==='Update'?'Here':e.type;
     var b=document.createElement('b');b.textContent=e.person;
     d.appendChild(tg);d.appendChild(b);d.appendChild(document.createTextNode(' '+logText(e)));
     if(e.status){var st=document.createElement('div');st.className='st'+(e.type==='Arrived'||/^At /.test(e.status)?' at':'');st.textContent=e.status;d.appendChild(st)}
     var a=document.createElement('div');a.className='a';
-    a.textContent=fmtT(e.ts)+' · total '+e.total+' m'+(e.acc?' · ±'+e.acc+' m':'');
+    a.textContent=fmtT(e.ts)+' ('+agoTxt(age(e.ts))+') · walked '+e.total+' m total'+(e.acc?' · ±'+e.acc+' m':'');
     d.appendChild(a);box.appendChild(d);
   }
 }
@@ -594,6 +667,17 @@ $('logbtn').onclick=function(){
 };
 $('logx').onclick=function(){$('logp').classList.add('hidden')};
 $('logf').onchange=renderLog;
+$('logperson').onchange=renderLog;
+function fillPeople(){
+  var sel=$('logperson'),cur=sel.value,seen={},names=[];
+  logData.forEach(function(e){if(!seen[e.pid]){seen[e.pid]=1}seen[e.pid]=e.person});
+  Object.keys(seen).forEach(function(pid){names.push([pid,seen[pid]])});
+  names.sort(function(a,b){return String(a[1]).localeCompare(String(b[1]))});
+  if(sel.options.length===names.length+1)return;
+  sel.innerHTML='';var o=document.createElement('option');o.value='';o.textContent='Everyone';sel.appendChild(o);
+  names.forEach(function(x){var op=document.createElement('option');op.value=x[0];op.textContent=x[1];sel.appendChild(op)});
+  sel.value=cur;
+}
 $('spots').onclick=function(){
   editMode=!editMode;$('spots').textContent='Edit spots: '+(editMode?'on':'off');
   if(map)map.closePopup();drawCps();
@@ -620,6 +704,8 @@ function connect(){
     var e=JSON.parse(m.data);pushLog(e);
     if(e.type==='Arrived')toast(e.person+' arrived at '+e.checkpoint);
     else if(e.type==='Left')toast(e.person+' left '+e.checkpoint);
+    else if(e.type==='Lost signal')toast('⚠ '+e.person+' has no signal');
+    else if(e.type==='Back online')toast(e.person+' is back online');
   });
   es.addEventListener('loc',function(m){
     var d=JSON.parse(m.data); skew=d.now-Date.now();
@@ -641,21 +727,40 @@ function fit(){
 
 var rq=0;
 function render(){ if(rq)return; rq=requestAnimationFrame(function(){rq=0;draw()}) }
+var LOSTS=120;
+function pstate(p){if(p.stopped)return 'stopped';if(p.lost||age(p.ts)>LOSTS)return 'lost';return p.cp?'at':'enroute'}
 function draw(){
-  var ids=Object.keys(people).sort(function(a,b){return people[b].ts-people[a].ts});
-  var live=ids.filter(function(k){return stateOf(people[k])==='live'}).length;
-  $('cnt').textContent=' · '+live+' live';
-  $('shl').textContent='People ('+ids.length+')';
+  var ids=Object.keys(people),rank={lost:0,at:1,enroute:1,stopped:2},n={at:0,enroute:0,lost:0,stopped:0};
+  ids.forEach(function(k){n[pstate(people[k])]++});
+  // problems first, finished last, everyone else A-Z (stable, so the list doesn't jump around)
+  ids.sort(function(a,b){var A=people[a],B=people[b];return (rank[pstate(A)]-rank[pstate(B)])||String(A.name).localeCompare(String(B.name))});
+  $('cnt').textContent=' · '+(n.at+n.enroute)+' live'+(n.lost?' · '+n.lost+' no signal':'');
+  $('shl').textContent=ids.length+' people'+(n.at?' · '+n.at+' at a checkpoint':'')+(n.lost?' · '+n.lost+' NO SIGNAL':'');
   var box=$('list'); box.innerHTML='';
   if(!ids.length){var e=document.createElement('div');e.className='empty';e.textContent='Nobody yet. Tap "Share link" and send it to your group.';box.appendChild(e)}
   ids.forEach(function(k){
-    var p=people[k],st=stateOf(p);
-    var r=document.createElement('div');r.className='row'+(st!=='live'?' stale':'');
+    var p=people[k],st=pstate(p);
+    var r=document.createElement('div');r.className='pc '+st;
+    var top=document.createElement('div');top.className='pt';
     var c=document.createElement('span');c.className='c';c.style.background=color(k);
-    var n=document.createElement('span');n.className='n';n.textContent=p.name;
-    var t=document.createElement('span');t.className='t';
-    t.textContent=(p.cp?'at '+cpNameOf(p.cp)+' · ':'')+(st==='stopped'?'stopped sharing':agoTxt(age(p.ts))+(p.acc?' · ±'+p.acc+'m':''));
-    r.appendChild(c);r.appendChild(n);r.appendChild(t);
+    var nm=document.createElement('span');nm.className='n';nm.textContent=p.name;
+    var bd=document.createElement('span');bd.className='bd';
+    bd.textContent=st==='at'?'At '+cpNameOf(p.cp):st==='enroute'?'En route':st==='lost'?'No signal '+agoTxt(age(p.ts)).replace(' ago',''):'Stopped sharing';
+    top.appendChild(c);top.appendChild(nm);top.appendChild(bd);r.appendChild(top);
+    var w=document.createElement('div');w.className='pw';
+    w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'');
+    r.appendChild(w);
+    if(cpData.length){
+      var ch=document.createElement('div');ch.className='chips';
+      cpData.forEach(function(cp){
+        var v=p.visits&&p.visits[cp.id],s=document.createElement('span');
+        s.className='chip'+(v?' done':'')+(p.cp===cp.id?' here':'');
+        s.textContent=(v?'✓ ':'')+cp.name;
+        if(v)s.title='First arrived '+new Date(v.first).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+(v.count>1?' · '+v.count+' visits':'');
+        ch.appendChild(s);
+      });
+      r.appendChild(ch);
+    }
     r.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
     box.appendChild(r);
   });
@@ -984,7 +1089,7 @@ function api(req, res, id, action, u) {
     res.write('retry: 3000\n\n');
     const people = [...ev.people.values()]
       .filter(p => host || !p.stopped)
-      .map(p => host ? Object.assign(pub(p, true), { trail: (p.trail || []).map(x => [x[0], x[1]]) }) : pub(p, false));
+      .map(p => host ? Object.assign(pub(p, true, ev), { trail: (p.trail || []).map(x => [x[0], x[1]]) }) : pub(p, false));
     const snap = { name: ev.name, people, now: Date.now() };
     if (host) snap.checkpoints = pubCps(ev);
     res.write('event: snapshot\ndata: ' + JSON.stringify(snap) + '\n\n');
@@ -1015,13 +1120,15 @@ function api(req, res, id, action, u) {
       p.lat = lat; p.lng = lng;
       p.acc = Number.isFinite(Number(b.acc)) && b.acc !== null ? Math.round(Number(b.acc)) : null;
       const wasStopped = p.stopped === true;
-      p.ts = now; p.stopped = false;
+      const wasLost = p.lost === true;
+      p.ts = now; p.stopped = false; p.lost = false;
       const lg = p.lg || (p.lg = { ts: 0, lat: null, lng: null, total: 0 });
       let logType = null, movedM = 0;
       if (lg.lat === null) logType = 'Joined';
       else {
         movedM = dist(lg.lat, lg.lng, lat, lng);
         if (wasStopped) logType = 'Resumed';
+        else if (wasLost) logType = 'Back online';
         else if (movedM >= MOVE_M) logType = 'Moved';
         else if (now - lg.ts >= UPDATE_MS) logType = 'Update';
       }
@@ -1041,7 +1148,12 @@ function api(req, res, id, action, u) {
       if (logType) logRow(ev, p, logType, movedM, newCp);
       if (cpChanged) {
         if (prevCp) logRow(ev, p, 'Left', logType ? 0 : movedM, prevCp);
-        if (newCp) logRow(ev, p, 'Arrived', logType || prevCp ? 0 : movedM, newCp);
+        if (newCp) {
+          const vs = p.visits || (p.visits = {});
+          const v = vs[newCp];
+          if (v) { v.count++; v.last = now; } else vs[newCp] = { first: now, last: now, count: 1 };
+          logRow(ev, p, 'Arrived', logType || prevCp ? 0 : movedM, newCp);
+        }
       }
       if ((logType || cpChanged) && ni) lg.near = { id: ni.id, d: ni.d };
       const last = p.trail[p.trail.length - 1];
@@ -1061,7 +1173,7 @@ function api(req, res, id, action, u) {
       if (err) return json(res, 400, { error: 'bad json' });
       const p = ev.people.get(String(b.pid || ''));
       if (p && p.lat !== undefined) {
-        if (!p.stopped) { p.ts = Date.now(); logRow(ev, p, 'Stopped', 0); }
+        if (!p.stopped) { p.ts = Date.now(); p.lost = false; logRow(ev, p, 'Stopped', 0); }
         p.stopped = true; ev.last = Date.now(); dirty = true;
         broadcastLoc(ev, p, { pt: false, now: Date.now() });
         // someone who stops sharing also stops seeing everyone else
@@ -1076,9 +1188,9 @@ function api(req, res, id, action, u) {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
     if (u.searchParams.get('format') === 'csv') {
       const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
-      const lines = ['Time,Person,Event,Checkpoint,Latitude,Longitude,Accuracy (m),Moved (m),Total (m),Nearest checkpoint,Distance to nearest (m),Closer by (m),Status'];
-      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.type), q(e.checkpoint), e.lat, e.lng, e.acc == null ? '' : e.acc, e.moved, e.total,
-        q(e.nearest), e.nearDist == null ? '' : e.nearDist, e.toward == null ? '' : e.toward, q(e.status)].join(','));
+      const lines = ['Time,Person,What happened,Location status,Event,Checkpoint,Nearest checkpoint,Distance to nearest (m),Closer by (m),Moved (m),Total (m),Accuracy (m),Latitude,Longitude'];
+      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.text || e.type), q(e.status), q(e.type), q(e.checkpoint), q(e.nearest),
+        e.nearDist == null ? '' : e.nearDist, e.toward == null ? '' : e.toward, e.moved, e.total, e.acc == null ? '' : e.acc, e.lat, e.lng].join(','));
       res.writeHead(200, {
         'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store',
         'Content-Disposition': 'attachment; filename="activity-log-' + ev.id + '.csv"'
