@@ -137,14 +137,36 @@ function cpName(ev, id) {
   const c = id && ev.checkpoints.find(x => x.id === id);
   return c ? c.name : '';
 }
+function nearest(ev, lat, lng) {
+  let b = null;
+  for (const c of ev.checkpoints) {
+    const d = dist(c.lat, c.lng, lat, lng);
+    if (!b || d < b.d) b = { id: c.id, name: c.name, d };
+  }
+  return b;
+}
+/* Human-readable position status: "Arrived at X" / "At X" / "250 m from X (closer by 40 m)" */
+function statusText(ev, p, type, checkpoint) {
+  if (type === 'Arrived') return 'Arrived at ' + checkpoint;
+  const nc = p.nearCur;
+  if (p.cp) return 'At ' + cpName(ev, p.cp);
+  if (!nc) return '';
+  let s = nc.d + ' m from ' + nc.name;
+  if (nc.toward > 0) s += ' (closer by ' + nc.toward + ' m)';
+  else if (nc.toward < 0) s += ' (farther by ' + (-nc.toward) + ' m)';
+  return s;
+}
 /* One event -> the in-app log (host panel) AND the spreadsheet queue. checkpointId: the checkpoint it is about. */
 function logRow(ev, p, type, moved, checkpointId) {
+  const nc = p.nearCur;
   const entry = {
     ts: p.ts || Date.now(), pid: p.pid, person: p.name, type,
     checkpoint: cpName(ev, checkpointId !== undefined ? checkpointId : p.cp),
     lat: p.lat, lng: p.lng, acc: p.acc,
-    moved: Math.round(moved || 0), total: Math.round((p.lg && p.lg.total) || 0)
+    moved: Math.round(moved || 0), total: Math.round((p.lg && p.lg.total) || 0),
+    nearest: nc ? nc.name : '', nearDist: nc ? nc.d : null, toward: nc ? nc.toward : null
   };
+  entry.status = statusText(ev, p, type, entry.checkpoint);
   ev.log.push(entry);
   if (ev.log.length > MAX_LOG) ev.log.splice(0, ev.log.length - MAX_LOG);
   broadcast(ev, 'log', entry, true);
@@ -350,6 +372,7 @@ ${BASE_CSS}
 #logl{flex:1;overflow:auto;padding-bottom:env(safe-area-inset-bottom)}
 .le{padding:10px 14px;border-bottom:1px solid #1e293b;font-size:15px;line-height:1.35}
 .le .a{color:#94a3b8;font-size:12.5px;margin-top:2px}
+.le .st{color:#7dd3fc;font-size:14px;margin-top:3px;font-weight:600}.le .st.at{color:#4ade80}
 .le .tag{display:inline-block;font-size:12px;font-weight:700;padding:1px 7px;border-radius:8px;margin-right:6px;background:#334155;color:#e2e8f0}
 .le .tag.Arrived{background:#166534;color:#dcfce7}.le .tag.Left{background:#92400e;color:#fef3c7}.le .tag.Stopped{background:#7f1d1d;color:#fee2e2}
 #toast{position:absolute;left:50%;top:90px;transform:translateX(-50%);z-index:2000;background:#111827;color:#fff;padding:8px 14px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
@@ -552,6 +575,7 @@ function renderLog(){
     var tg=document.createElement('span');tg.className='tag '+e.type;tg.textContent=e.type==='Update'?'Here':e.type;
     var b=document.createElement('b');b.textContent=e.person;
     d.appendChild(tg);d.appendChild(b);d.appendChild(document.createTextNode(' '+logText(e)));
+    if(e.status){var st=document.createElement('div');st.className='st'+(e.type==='Arrived'||/^At /.test(e.status)?' at':'');st.textContent=e.status;d.appendChild(st)}
     var a=document.createElement('div');a.className='a';
     a.textContent=fmtT(e.ts)+' · total '+e.total+' m'+(e.acc?' · ±'+e.acc+' m':'');
     d.appendChild(a);box.appendChild(d);
@@ -1008,11 +1032,18 @@ function api(req, res, id, action, u) {
         lg.total += movedM; lg.ts = now; lg.lat = lat; lg.lng = lng;
       }
       p.cp = newCp;
+      // nearest checkpoint + progress toward it since the last logged entry (positive = got closer)
+      const ni = nearest(ev, lat, lng);
+      p.nearCur = ni ? {
+        id: ni.id, name: ni.name, d: Math.round(ni.d),
+        toward: lg.near && lg.near.id === ni.id ? Math.round(lg.near.d - ni.d) : null
+      } : null;
       if (logType) logRow(ev, p, logType, movedM, newCp);
       if (cpChanged) {
         if (prevCp) logRow(ev, p, 'Left', logType ? 0 : movedM, prevCp);
         if (newCp) logRow(ev, p, 'Arrived', logType || prevCp ? 0 : movedM, newCp);
       }
+      if ((logType || cpChanged) && ni) lg.near = { id: ni.id, d: ni.d };
       const last = p.trail[p.trail.length - 1];
       let pt = false;
       if (!last || Math.hypot((lat - last[0]) * 111000, (lng - last[1]) * 111000 * Math.cos(lat * Math.PI / 180)) > 8) {
@@ -1045,8 +1076,9 @@ function api(req, res, id, action, u) {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
     if (u.searchParams.get('format') === 'csv') {
       const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
-      const lines = ['Time,Person,Event,Checkpoint,Latitude,Longitude,Accuracy (m),Moved (m),Total (m)'];
-      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.type), q(e.checkpoint), e.lat, e.lng, e.acc == null ? '' : e.acc, e.moved, e.total].join(','));
+      const lines = ['Time,Person,Event,Checkpoint,Latitude,Longitude,Accuracy (m),Moved (m),Total (m),Nearest checkpoint,Distance to nearest (m),Closer by (m),Status'];
+      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.type), q(e.checkpoint), e.lat, e.lng, e.acc == null ? '' : e.acc, e.moved, e.total,
+        q(e.nearest), e.nearDist == null ? '' : e.nearDist, e.toward == null ? '' : e.toward, q(e.status)].join(','));
       res.writeHead(200, {
         'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store',
         'Content-Disposition': 'attachment; filename="activity-log-' + ev.id + '.csv"'
