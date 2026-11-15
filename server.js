@@ -565,6 +565,15 @@ ${BASE_CSS}
 .pc .pt{display:flex;align-items:center;gap:8px}
 .pc .c{width:14px;height:14px;border-radius:50%;flex:none}
 .pc .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;font-size:16px}
+.pc .pg{flex:none;font-size:12px;font-weight:700;padding:2px 9px;border-radius:10px;border:1px solid #6d28d9;background:transparent;color:#ddd6fe;cursor:pointer}
+.pc .pg.all{background:#14532d;border-color:#166534;color:#bbf7d0}
+#progp{position:absolute;inset:0;z-index:3100;background:rgba(2,6,23,.72);display:flex;align-items:flex-end;justify-content:center}
+#progc{width:100%;max-width:480px;background:#0f172a;border-radius:16px 16px 0 0;padding:14px 16px calc(18px + env(safe-area-inset-bottom));max-height:70%;overflow:auto}
+#progc h3{margin:0 0 8px;font-size:16px}
+#progc .pr{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid #1e293b;font-size:15px}
+#progc .pr i{flex:none;width:22px;height:22px;border-radius:50%;border:2px solid #475569;display:flex;align-items:center;justify-content:center;font-style:normal;font-size:13px}
+#progc .pr.d i{background:#16a34a;border-color:#16a34a;color:#fff}
+#progc .pr span.t{margin-left:auto;color:#94a3b8;font-size:13px}
 .pc .bd{flex:none;font-size:12.5px;font-weight:700;padding:2px 9px;border-radius:10px;background:#334155}
 .pc.at .bd{background:#166534;color:#dcfce7}.pc.enroute .bd{background:#075985;color:#e0f2fe}.pc.lost .bd{background:#c2410c;color:#fff}
 .pc .pw{font-size:13px;color:#94a3b8;margin:3px 0 0 22px}
@@ -650,6 +659,7 @@ ${BASE_CSS}
     <div id="sh"><span id="shl">People</span><span id="chev">&#9662;</span></div>
     <div id="list"></div>
   </div>
+  <div id="progp" class="hidden"><div id="progc"></div></div>
   <div id="guidep" class="hidden">
     <div id="guideh"><b id="guidet">Mission guide</b><button id="guidex" class="btn sm">Close</button></div>
     <div id="guideb"></div>
@@ -782,6 +792,18 @@ var MAXT=300;
 /* ---- checkpoints (stars + radius circles) ---- */
 var CPCOL={'Equipment Pickup':'#22d3ee','FC Retrieval':'#ec4899','FOB Securement':'#fb923c'};
 var cpObjs={}, cpData=[], editMode=false;
+function showProg(k){
+  var p=people[k];if(!p)return;var box=$('progc');box.innerHTML='';
+  var h=document.createElement('h3');h.textContent=p.name+' \u2013 progress';box.appendChild(h);
+  var ORD=['sunken','cto','sculpt','sage','drake'];
+  cpData.slice().sort(function(a,b){var x=ORD.indexOf(a.id),y=ORD.indexOf(b.id);return (x<0?9:x)-(y<0?9:y)}).forEach(function(cp){
+    var v=p.visits&&p.visits[cp.id],r=document.createElement('div');r.className='pr'+(v?' d':'');
+    var i=document.createElement('i');i.textContent=v?'\u2713':'';
+    var n=document.createElement('span');n.textContent=cp.headline||cp.label||cp.name;
+    var t=document.createElement('span');t.className='t';t.textContent=v?new Date(v.first).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):(p.cp===cp.id?'here now':'');
+    r.appendChild(i);r.appendChild(n);r.appendChild(t);box.appendChild(r)});
+  $('progp').classList.remove('hidden')}
+$('progp').onclick=function(e){if(e.target===this)this.classList.add('hidden')};
 function cpNameOf(id){for(var i=0;i<cpData.length;i++)if(cpData[i].id===id)return cpData[i].name;return ''}
 function starIcon(c){
   var pts=[];for(var i=0;i<14;i++){var r=i%2?7:15,a=-Math.PI/2+i*Math.PI/7;pts.push((17+r*Math.cos(a)).toFixed(1)+','+(17+r*Math.sin(a)).toFixed(1))}
@@ -982,7 +1004,11 @@ function draw(){
     var nm=document.createElement('span');nm.className='n';nm.textContent=p.name;
     var bd=document.createElement('span');bd.className='bd';
     bd.textContent=st==='at'?'At '+cpNameOf(p.cp):st==='enroute'?'En route':st==='lost'?'No signal '+agoTxt(age(p.ts)).replace(' ago',''):'Stopped sharing';
-    top.appendChild(c);top.appendChild(nm);top.appendChild(bd);r.appendChild(top);
+    top.appendChild(c);top.appendChild(nm);top.appendChild(bd);
+    if(cpData.length){var nd=0;cpData.forEach(function(cp){if(p.visits&&p.visits[cp.id])nd++});
+      var pg=document.createElement('button');pg.className='pg'+(nd===cpData.length?' all':'');pg.textContent='\u2713 '+nd+'/'+cpData.length;pg.title='Flight progress';
+      pg.onclick=function(e){e.stopPropagation();showProg(k)};top.appendChild(pg)}
+    r.appendChild(top);
     var w=document.createElement('div');w.className='pw';
     w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'');
     r.appendChild(w);
