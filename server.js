@@ -87,6 +87,47 @@ function endEvent(ev) {
 function pub(p) {
   return { pid: p.pid, name: p.name, lat: p.lat, lng: p.lng, acc: p.acc, ts: p.ts, stopped: !!p.stopped };
 }
+/* ---------- accountability log -> Google Sheet (via Apps Script web app) ---------- */
+const SHEET_URL = process.env.SHEET_WEBHOOK_URL || '';
+const SHEET_SECRET = process.env.SHEET_SECRET || '';
+const MOVE_M = 30;            // log a "Moved" row after this many metres
+const CHECKPOINT_MS = 300000; // and a "Checkpoint" row at least this often while sharing
+const sheetQ = [];
+let flushing = false;
+function dist(aLat, aLng, bLat, bLng) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (bLat - aLat) * r, dLng = (bLng - aLng) * r;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function logRow(ev, p, type, moved) {
+  if (!SHEET_URL) return;
+  sheetQ.push({
+    ts: new Date(p.ts || Date.now()).toISOString(), activity: ev.name, activityId: ev.id,
+    person: p.name, pid: p.pid, type, lat: p.lat, lng: p.lng, acc: p.acc,
+    moved: Math.round(moved || 0), total: Math.round((p.lg && p.lg.total) || 0)
+  });
+  if (sheetQ.length > 5000) sheetQ.splice(0, sheetQ.length - 5000);
+}
+async function flushSheet() {
+  if (!SHEET_URL || flushing || !sheetQ.length) return;
+  flushing = true;
+  const batch = sheetQ.splice(0, 200);
+  try {
+    const r = await fetch(SHEET_URL, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ secret: SHEET_SECRET, rows: batch }), redirect: 'follow'
+    });
+    const txt = await r.text();
+    if (!r.ok || !/"ok"\s*:\s*true/.test(txt)) throw new Error('HTTP ' + r.status + ' ' + txt.slice(0, 120));
+  } catch (e) {
+    sheetQ.unshift(...batch); // keep rows and retry next round
+    console.log('Sheet log failed, will retry:', e.message);
+  }
+  flushing = false;
+}
+if (SHEET_URL) { setInterval(flushSheet, 15000).unref(); console.log('Logging to Google Sheet is ON'); }
+
 const createLog = new Map();
 function rateLimited(ip) {
   const now = Date.now();
@@ -509,6 +550,7 @@ function status(t,err){$('st').textContent=t;$('st').className=err?'err':''}
 
 fetch('/api/e/'+ID).then(function(r){return r.ok?r.json():Promise.reject()}).then(function(d){
   shared=!!d.shared;
+  if(d.logging){var REC=' Your location and movement are also recorded in a spreadsheet kept by the host.';NOTE_HOST+=REC;NOTE_ALL+=REC}
   $('note').textContent=shared?NOTE_ALL:NOTE_HOST;
   $('ev').textContent=d.name; document.title=d.name; $('go').disabled=false;
   if(lsGet('at_sharing_'+ID)==='1')startSharing(true);
@@ -677,7 +719,7 @@ function api(req, res, id, action, u) {
   if (!ev) return json(res, 404, { error: 'not found' });
   const t = u.searchParams.get('t');
 
-  if (!action && m === 'GET') return json(res, 200, { name: ev.name, host: tokenOk(ev, t), shared: ev.shared });
+  if (!action && m === 'GET') return json(res, 200, { name: ev.name, host: tokenOk(ev, t), shared: ev.shared, logging: !!SHEET_URL });
 
   if (!action && m === 'DELETE') {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
@@ -727,7 +769,21 @@ function api(req, res, id, action, u) {
       p.name = String(b.name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 40) || 'Guest';
       p.lat = lat; p.lng = lng;
       p.acc = Number.isFinite(Number(b.acc)) && b.acc !== null ? Math.round(Number(b.acc)) : null;
+      const wasStopped = p.stopped === true;
       p.ts = now; p.stopped = false;
+      const lg = p.lg || (p.lg = { ts: 0, lat: null, lng: null, total: 0 });
+      let logType = null, movedM = 0;
+      if (lg.lat === null) logType = 'Joined';
+      else {
+        movedM = dist(lg.lat, lg.lng, lat, lng);
+        if (wasStopped) logType = 'Resumed';
+        else if (movedM >= MOVE_M) logType = 'Moved';
+        else if (now - lg.ts >= CHECKPOINT_MS) logType = 'Checkpoint';
+      }
+      if (logType) {
+        lg.total += movedM; lg.ts = now; lg.lat = lat; lg.lng = lng;
+        logRow(ev, p, logType, movedM);
+      }
       const last = p.trail[p.trail.length - 1];
       let pt = false;
       if (!last || Math.hypot((lat - last[0]) * 111000, (lng - last[1]) * 111000 * Math.cos(lat * Math.PI / 180)) > 8) {
@@ -745,6 +801,7 @@ function api(req, res, id, action, u) {
       if (err) return json(res, 400, { error: 'bad json' });
       const p = ev.people.get(String(b.pid || ''));
       if (p && p.lat !== undefined) {
+        if (!p.stopped) { p.ts = Date.now(); logRow(ev, p, 'Stopped', 0); }
         p.stopped = true; ev.last = Date.now(); dirty = true;
         broadcast(ev, 'loc', Object.assign(pub(p), { pt: false, now: Date.now() }));
         // someone who stops sharing also stops seeing everyone else
@@ -803,4 +860,4 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => console.log('Activity Tracker running on http://localhost:' + PORT));
-process.on('SIGTERM', () => { dirty = true; save(); process.exit(0); });
+process.on('SIGTERM', () => { dirty = true; save(); flushSheet().finally(() => process.exit(0)); setTimeout(() => process.exit(0), 4000).unref(); });
