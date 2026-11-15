@@ -20,6 +20,25 @@ const MAX_PEOPLE = 200;
 const events = new Map();
 let dirty = false;
 
+/* ---------- checkpoints (from the LLAB 9 ConOps maps: master map + equipment drop maps) ----------
+ * Coordinates were estimated from the aerial master map (scaled from Pauley Pavilion's published
+ * position), so they are APPROXIMATE (about +/-50-100 m). The host can drag each one to its exact
+ * spot with "Edit spots" on the host map. Radius = how close counts as "at" the checkpoint. */
+const DEFAULT_CHECKPOINTS = [
+  { id: 'drake',    name: 'Drake Stadium',     type: 'FOB Securement',   lat: 34.07165, lng: -118.44842, radius: 90,
+    items: '', source: 'Master map (orange star)' },
+  { id: 'sage',     name: 'Sage Hill',         type: 'FC Retrieval',     lat: 34.07452, lng: -118.45549, radius: 100,
+    items: '', source: 'Master map (magenta star)' },
+  { id: 'cto',      name: 'CTO Court',         type: 'Equipment Pickup', lat: 34.07017, lng: -118.44550, radius: 75,
+    items: 'Ammo Can (drop 1)', source: 'Master map (cyan star); ConOps file 1: Equipment Drop 1 = Ammo Can' },
+  { id: 'sunken',   name: 'Sunken Garden (S)', type: 'Equipment Pickup', lat: 34.07165, lng: -118.43951, radius: 75,
+    items: 'Med Kit (drop 2)', source: 'Master map (cyan star); ConOps files 1 and 2: Equipment Drop 2 = Med Kit' },
+  { id: 'sculpt',   name: 'Sculpture Garden',  type: 'Equipment Pickup', lat: 34.07549, lng: -118.43938, radius: 75,
+    items: 'Rucksack & Staff (drop 1)', source: 'Master map (cyan star); ConOps file 2: Equipment Drop 1 = Rucksack & Staff' }
+];
+function cloneCheckpoints() { return JSON.parse(JSON.stringify(DEFAULT_CHECKPOINTS)); }
+const MAX_LOG = 3000;
+
 /* ---------- persistence (simple JSON snapshot) ---------- */
 function load() {
   try {
@@ -27,19 +46,22 @@ function load() {
     for (const e of raw) {
       events.set(e.id, {
         id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared === true,
+        checkpoints: Array.isArray(e.checkpoints) ? e.checkpoints : cloneCheckpoints(), log: Array.isArray(e.log) ? e.log : [],
         people: new Map(e.people.map(p => [p.pid, p])), clients: new Set()
       });
     }
   } catch (_) { /* first run */ }
 }
-function save() {
+function save(sync) {
   if (!dirty) return;
   dirty = false;
   const out = [...events.values()].map(e => ({
     id: e.id, name: e.name, token: e.token, created: e.created, last: e.last, shared: e.shared,
+    checkpoints: e.checkpoints, log: e.log,
     people: [...e.people.values()]
   }));
-  fs.writeFile(DATA_FILE, JSON.stringify(out), () => {});
+  if (sync) { try { fs.writeFileSync(DATA_FILE, JSON.stringify(out)); } catch (_) {} }
+  else fs.writeFile(DATA_FILE, JSON.stringify(out), () => {});
 }
 load();
 setInterval(save, 30000).unref();
@@ -75,23 +97,34 @@ function tokenOk(ev, t) {
   if (!t || typeof t !== 'string' || t.length !== ev.token.length) return false;
   return crypto.timingSafeEqual(Buffer.from(t), Buffer.from(ev.token));
 }
-function broadcast(ev, type, data) {
+function broadcast(ev, type, data, hostOnly) {
   const msg = 'event: ' + type + '\ndata: ' + JSON.stringify(data) + '\n\n';
-  for (const c of ev.clients) c.write(msg);
+  for (const c of ev.clients) if (!hostOnly || c._host) c.write(msg);
 }
 function endEvent(ev) {
   broadcast(ev, 'ended', {});
   for (const c of ev.clients) c.end();
   ev.clients.clear();
 }
-function pub(p) {
-  return { pid: p.pid, name: p.name, lat: p.lat, lng: p.lng, acc: p.acc, ts: p.ts, stopped: !!p.stopped };
+// Checkpoint info (which checkpoint someone is at) is for the host only.
+function pub(p, host) {
+  const o = { pid: p.pid, name: p.name, lat: p.lat, lng: p.lng, acc: p.acc, ts: p.ts, stopped: !!p.stopped };
+  if (host) o.cp = p.cp || null;
+  return o;
+}
+function broadcastLoc(ev, p, extra) {
+  const mk = host => 'event: loc\ndata: ' + JSON.stringify(Object.assign(pub(p, host), extra)) + '\n\n';
+  const h = mk(true), g = mk(false);
+  for (const c of ev.clients) c.write(c._host ? h : g);
+}
+function pubCps(ev) {
+  return ev.checkpoints.map(c => ({ id: c.id, name: c.name, type: c.type, lat: c.lat, lng: c.lng, radius: c.radius, items: c.items }));
 }
 /* ---------- accountability log -> Google Sheet (via Apps Script web app) ---------- */
 const SHEET_URL = process.env.SHEET_WEBHOOK_URL || '';
 const SHEET_SECRET = process.env.SHEET_SECRET || '';
 const MOVE_M = 30;            // log a "Moved" row after this many metres
-const CHECKPOINT_MS = 300000; // and a "Checkpoint" row at least this often while sharing
+const UPDATE_MS = 300000;     // and an "Update" row at least this often while sharing
 const sheetQ = [];
 let flushing = false;
 function dist(aLat, aLng, bLat, bLng) {
@@ -100,26 +133,60 @@ function dist(aLat, aLng, bLat, bLng) {
   const x = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(x));
 }
-function logRow(ev, p, type, moved) {
-  if (!SHEET_URL) return;
-  sheetQ.push({
-    ts: new Date(p.ts || Date.now()).toISOString(), activity: ev.name, activityId: ev.id,
-    person: p.name, pid: p.pid, type, lat: p.lat, lng: p.lng, acc: p.acc,
+function cpName(ev, id) {
+  const c = id && ev.checkpoints.find(x => x.id === id);
+  return c ? c.name : '';
+}
+/* One event -> the in-app log (host panel) AND the spreadsheet queue. checkpointId: the checkpoint it is about. */
+function logRow(ev, p, type, moved, checkpointId) {
+  const entry = {
+    ts: p.ts || Date.now(), pid: p.pid, person: p.name, type,
+    checkpoint: cpName(ev, checkpointId !== undefined ? checkpointId : p.cp),
+    lat: p.lat, lng: p.lng, acc: p.acc,
     moved: Math.round(moved || 0), total: Math.round((p.lg && p.lg.total) || 0)
-  });
+  };
+  ev.log.push(entry);
+  if (ev.log.length > MAX_LOG) ev.log.splice(0, ev.log.length - MAX_LOG);
+  broadcast(ev, 'log', entry, true);
+  if (!SHEET_URL) return;
+  sheetQ.push(Object.assign({}, entry, { ts: new Date(entry.ts).toISOString(), activity: ev.name, activityId: ev.id }));
   if (sheetQ.length > 5000) sheetQ.splice(0, sheetQ.length - 5000);
+}
+/* Which checkpoint is this position in? Leaving needs 15% extra distance so GPS jitter at the edge doesn't flap. */
+function cpAt(ev, p, lat, lng) {
+  const cur = p.cp && ev.checkpoints.find(c => c.id === p.cp);
+  if (cur && dist(cur.lat, cur.lng, lat, lng) <= cur.radius * 1.15) return cur.id;
+  let best = null, bd = Infinity;
+  for (const c of ev.checkpoints) {
+    const d = dist(c.lat, c.lng, lat, lng);
+    if (d <= c.radius && d < bd) { best = c.id; bd = d; }
+  }
+  return best;
+}
+async function postSheet(payload) {
+  const r = await fetch(SHEET_URL, {
+    method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ secret: SHEET_SECRET }, payload)), redirect: 'follow'
+  });
+  const txt = await r.text();
+  if (!r.ok || !/"ok"\s*:\s*true/.test(txt)) throw new Error('HTTP ' + r.status + ' ' + txt.slice(0, 120));
+}
+/* Send the checkpoint reference table (names, types, items, positions) to the sheet's "Checkpoints" tab. */
+const cpTimers = new Map();
+function syncCheckpointsToSheet(ev) {
+  if (!SHEET_URL) return;
+  clearTimeout(cpTimers.get(ev.id));
+  cpTimers.set(ev.id, setTimeout(() => {
+    postSheet({ action: 'checkpoints', activity: ev.name, activityId: ev.id, checkpoints: ev.checkpoints })
+      .catch(e => { console.log('Checkpoint table sync failed, retrying in 60s:', e.message); cpTimers.set(ev.id, setTimeout(() => syncCheckpointsToSheet(ev), 60000)); });
+  }, 3000));
 }
 async function flushSheet() {
   if (!SHEET_URL || flushing || !sheetQ.length) return;
   flushing = true;
   const batch = sheetQ.splice(0, 200);
   try {
-    const r = await fetch(SHEET_URL, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ secret: SHEET_SECRET, rows: batch }), redirect: 'follow'
-    });
-    const txt = await r.text();
-    if (!r.ok || !/"ok"\s*:\s*true/.test(txt)) throw new Error('HTTP ' + r.status + ' ' + txt.slice(0, 120));
+    await postSheet({ rows: batch });
   } catch (e) {
     sheetQ.unshift(...batch); // keep rows and retry next round
     console.log('Sheet log failed, will retry:', e.message);
@@ -268,6 +335,23 @@ ${BASE_CSS}
 .mk .lbl{position:absolute;transform:translate(-50%,0);top:18px;white-space:nowrap;background:rgba(15,23,42,.88);color:#fff;font:600 11px system-ui;padding:1px 6px;border-radius:8px}
 .mk.stale .pin{filter:grayscale(1);opacity:.65}
 .mk.stale .lbl{opacity:.75}
+.cpmk{background:none;border:0}
+.cpmk .cplbl{position:absolute;left:50%;top:32px;transform:translateX(-50%);white-space:nowrap;background:rgba(15,23,42,.9);color:#fff;font:700 11px system-ui;padding:1px 6px;border-radius:8px}
+.cpmk svg{display:block;filter:drop-shadow(0 1px 3px rgba(0,0,0,.6))}
+.cpop{font:14px system-ui;min-width:170px;color:#0f172a}
+.cpop b{font-size:15px}.cpop .m{color:#475569;font-size:13px;margin-top:2px}
+.cpop input{width:80px;padding:5px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px}
+.cpop button{margin-left:6px;padding:5px 10px;border:0;border-radius:6px;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+#logp{position:absolute;inset:0;z-index:3000;background:#0f172a;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+#logh{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px;border-bottom:1px solid #1e293b}
+#logh b{font-size:17px;flex:1 1 auto}
+#logf{padding:7px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:14px}
+#logcsv{text-decoration:none;display:inline-block}
+#logl{flex:1;overflow:auto;padding-bottom:env(safe-area-inset-bottom)}
+.le{padding:10px 14px;border-bottom:1px solid #1e293b;font-size:15px;line-height:1.35}
+.le .a{color:#94a3b8;font-size:12.5px;margin-top:2px}
+.le .tag{display:inline-block;font-size:12px;font-weight:700;padding:1px 7px;border-radius:8px;margin-right:6px;background:#334155;color:#e2e8f0}
+.le .tag.Arrived{background:#166534;color:#dcfce7}.le .tag.Left{background:#92400e;color:#fef3c7}.le .tag.Stopped{background:#7f1d1d;color:#fee2e2}
 #toast{position:absolute;left:50%;top:90px;transform:translateX(-50%);z-index:2000;background:#111827;color:#fff;padding:8px 14px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.on{opacity:1}
 </style>
@@ -287,11 +371,22 @@ ${BASE_CSS}
     <button id="share" class="btn sm">Share link</button>
     <button id="fit" class="btn sm sec">Fit all</button>
     <button id="trails" class="btn sm sec">Trails: on</button>
+    <button id="logbtn" class="btn sm">Log</button>
+    <button id="spots" class="btn sm sec">Edit spots: off</button>
     <button id="end" class="btn sm danger">End</button>
   </div>
   <div id="sheet">
     <div id="sh"><span id="shl">People</span><span id="chev">&#9662;</span></div>
     <div id="list"></div>
+  </div>
+  <div id="logp" class="hidden">
+    <div id="logh">
+      <b>Activity log <span id="logn" style="font-weight:400;color:#94a3b8;font-size:14px"></span></b>
+      <select id="logf"><option value="all">Everything</option><option value="cp">Checkpoints only</option></select>
+      <a id="logcsv" class="btn sm sec" href="#">Download CSV</a>
+      <button id="logx" class="btn sm">Close</button>
+    </div>
+    <div id="logl"></div>
   </div>
   <div id="toast"></div>
 </div>
@@ -380,11 +475,106 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
 var MAXT=300;
+
+/* ---- checkpoints (stars + radius circles) ---- */
+var CPCOL={'Equipment Pickup':'#22d3ee','FC Retrieval':'#ec4899','FOB Securement':'#fb923c'};
+var cpObjs={}, cpData=[], editMode=false;
+function cpNameOf(id){for(var i=0;i<cpData.length;i++)if(cpData[i].id===id)return cpData[i].name;return ''}
+function starIcon(c){
+  var pts=[];for(var i=0;i<14;i++){var r=i%2?7:15,a=-Math.PI/2+i*Math.PI/7;pts.push((17+r*Math.cos(a)).toFixed(1)+','+(17+r*Math.sin(a)).toFixed(1))}
+  var svg='<svg width="34" height="34" viewBox="0 0 34 34"><polygon points="'+pts.join(' ')+'" fill="'+(CPCOL[c.type]||'#fff')+'" stroke="#fff" stroke-width="1.5"/></svg>';
+  return L.divIcon({className:'cpmk',html:svg+'<div class="cplbl">'+esc(c.name)+'</div>',iconSize:[34,34],iconAnchor:[17,17]});
+}
+function postCp(body){
+  body.id=body.id;
+  fetch('/api/e/'+ev.id+'/checkpoints?t='+ev.token,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(function(r){if(!r.ok)throw 0;toast('Checkpoint saved')}).catch(function(){toast('Could not save checkpoint')});
+}
+function cpPopup(c){
+  var d=document.createElement('div');d.className='cpop';
+  var b=document.createElement('b');b.textContent=c.name;d.appendChild(b);
+  var t=document.createElement('div');t.className='m';t.textContent=c.type+' · radius '+c.radius+' m';d.appendChild(t);
+  if(c.items){var it=document.createElement('div');it.className='m';it.textContent='Equipment: '+c.items;d.appendChild(it)}
+  if(editMode){
+    var w=document.createElement('div');w.style.marginTop='8px';
+    var inp=document.createElement('input');inp.type='number';inp.min=10;inp.max=1000;inp.value=c.radius;
+    var sv=document.createElement('button');sv.textContent='Set radius (m)';
+    sv.onclick=function(){postCp({id:c.id,radius:Number(inp.value)})};
+    w.appendChild(inp);w.appendChild(sv);d.appendChild(w);
+    var h=document.createElement('div');h.className='m';h.textContent='Drag the star to move it.';d.appendChild(h);
+  }
+  return d;
+}
+function drawCps(list){
+  if(!map)return;
+  cpData=list||cpData;
+  Object.keys(cpObjs).forEach(function(k){map.removeLayer(cpObjs[k].m);map.removeLayer(cpObjs[k].c)});
+  cpObjs={};
+  cpData.forEach(function(c){
+    var col=CPCOL[c.type]||'#fff';
+    var circ=L.circle([c.lat,c.lng],{radius:c.radius,color:col,weight:2,opacity:.9,fillOpacity:.12,interactive:false}).addTo(map);
+    var mk=L.marker([c.lat,c.lng],{icon:starIcon(c),draggable:editMode,zIndexOffset:-500}).addTo(map);
+    mk.bindPopup(function(){return cpPopup(c)});
+    mk.on('drag',function(e){circ.setLatLng(e.latlng)});
+    mk.on('dragend',function(){var ll=mk.getLatLng();postCp({id:c.id,lat:ll.lat,lng:ll.lng})});
+    cpObjs[c.id]={m:mk,c:circ};
+  });
+}
+
+/* ---- in-app log ---- */
+var logData=[];
+function fmtT(ts){return new Date(ts).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function logText(e){
+  switch(e.type){
+    case 'Arrived':return 'arrived at '+e.checkpoint;
+    case 'Left':return 'left '+e.checkpoint;
+    case 'Moved':return 'moved '+e.moved+' m'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    case 'Joined':return 'started sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    case 'Resumed':return 'resumed sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    case 'Stopped':return 'stopped sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    default:return 'still here'+(e.checkpoint?' at '+e.checkpoint:'');
+  }
+}
+function renderLog(){
+  if($('logp').classList.contains('hidden'))return;
+  var only=$('logf').value==='cp';
+  var rows=logData.filter(function(e){return !only||e.type==='Arrived'||e.type==='Left'});
+  $('logn').textContent='('+rows.length+')';
+  var box=$('logl');box.innerHTML='';
+  if(!rows.length){var em=document.createElement('div');em.className='empty';em.textContent='Nothing logged yet.';box.appendChild(em);return}
+  for(var i=rows.length-1,n=0;i>=0&&n<500;i--,n++){
+    var e=rows[i],d=document.createElement('div');d.className='le';
+    var tg=document.createElement('span');tg.className='tag '+e.type;tg.textContent=e.type==='Update'?'Here':e.type;
+    var b=document.createElement('b');b.textContent=e.person;
+    d.appendChild(tg);d.appendChild(b);d.appendChild(document.createTextNode(' '+logText(e)));
+    var a=document.createElement('div');a.className='a';
+    a.textContent=fmtT(e.ts)+' · total '+e.total+' m'+(e.acc?' · ±'+e.acc+' m':'');
+    d.appendChild(a);box.appendChild(d);
+  }
+}
+function pushLog(e){
+  for(var i=logData.length-1;i>=0&&i>=logData.length-30;i--){var x=logData[i];if(x.ts===e.ts&&x.pid===e.pid&&x.type===e.type&&x.checkpoint===e.checkpoint)return}
+  logData.push(e);if(logData.length>3000)logData.shift();renderLog();
+}
+function loadLog(){
+  fetch('/api/e/'+ev.id+'/log?t='+ev.token).then(function(r){return r.json()}).then(function(d){logData=d.log||[];renderLog()}).catch(function(){});
+}
+$('logbtn').onclick=function(){
+  $('logcsv').href='/api/e/'+ev.id+'/log?format=csv&t='+ev.token;
+  $('logp').classList.remove('hidden');loadLog();
+};
+$('logx').onclick=function(){$('logp').classList.add('hidden')};
+$('logf').onchange=renderLog;
+$('spots').onclick=function(){
+  editMode=!editMode;$('spots').textContent='Edit spots: '+(editMode?'on':'off');
+  if(map)map.closePopup();drawCps();
+  if(editMode)toast('Drag a star to its exact spot. Tap it to set the radius.');
+};
 
 function connect(){
   if(es)es.close();
@@ -396,8 +586,16 @@ function connect(){
     $('tname').textContent=d.name;
     Object.keys(people).forEach(function(k){map.removeLayer(people[k].marker);map.removeLayer(people[k].line);delete people[k]});
     d.people.forEach(function(p){upsert(p,false,p.trail||[])});
+    drawCps(d.checkpoints);loadLog();
     if(!fitted&&d.people.length){fit();fitted=true}
+    else if(!fitted&&cpData.length){map.fitBounds(cpData.map(function(c){return [c.lat,c.lng]}),{padding:[70,70],maxZoom:17})}
     render();
+  });
+  es.addEventListener('cps',function(m){drawCps(JSON.parse(m.data).checkpoints)});
+  es.addEventListener('log',function(m){
+    var e=JSON.parse(m.data);pushLog(e);
+    if(e.type==='Arrived')toast(e.person+' arrived at '+e.checkpoint);
+    else if(e.type==='Left')toast(e.person+' left '+e.checkpoint);
   });
   es.addEventListener('loc',function(m){
     var d=JSON.parse(m.data); skew=d.now-Date.now();
@@ -432,7 +630,7 @@ function draw(){
     var c=document.createElement('span');c.className='c';c.style.background=color(k);
     var n=document.createElement('span');n.className='n';n.textContent=p.name;
     var t=document.createElement('span');t.className='t';
-    t.textContent=st==='stopped'?'stopped sharing':agoTxt(age(p.ts))+(p.acc?' · ±'+p.acc+'m':'');
+    t.textContent=(p.cp?'at '+cpNameOf(p.cp)+' · ':'')+(st==='stopped'?'stopped sharing':agoTxt(age(p.ts))+(p.acc?' · ±'+p.acc+'m':''));
     r.appendChild(c);r.appendChild(n);r.appendChild(t);
     r.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
     box.appendChild(r);
@@ -455,7 +653,7 @@ $('share').onclick=function(){
 $('end').onclick=function(){
   if(!confirm('End this activity? Everyone will stop appearing and the data is deleted.'))return;
   fetch('/api/e/'+ev.id+'?t='+ev.token,{method:'DELETE'}).then(function(){
-    forget(ev.id); if(es)es.close(); ev=null; fitted=false;
+    forget(ev.id); if(es)es.close(); ev=null; fitted=false; logData=[]; drawCps([]);
     Object.keys(people).forEach(function(k){map.removeLayer(people[k].marker);map.removeLayer(people[k].line);delete people[k]});
     history.replaceState(null,'',location.pathname); $('mk').disabled=false; showCreate();
   });
@@ -506,6 +704,9 @@ h1{margin:0;font-size:20px;font-weight:600;color:#cbd5e1}
 .mk .pin{position:absolute;width:30px;height:30px;border-radius:50%;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;color:#fff;font:700 13px system-ui;transform:translate(-50%,-50%)}
 .mk .lbl{position:absolute;transform:translate(-50%,0);top:18px;white-space:nowrap;background:rgba(15,23,42,.88);color:#fff;font:600 11px system-ui;padding:1px 6px;border-radius:8px}
 .mk.me .pin{box-shadow:0 0 0 4px rgba(59,130,246,.5),0 1px 6px rgba(0,0,0,.5)}
+.cpmk{background:none;border:0}
+.cpmk .cplbl{position:absolute;left:50%;top:32px;transform:translateX(-50%);white-space:nowrap;background:rgba(15,23,42,.9);color:#fff;font:700 11px system-ui;padding:1px 6px;border-radius:8px}
+.cpmk svg{display:block;filter:drop-shadow(0 1px 3px rgba(0,0,0,.6))}
 .mk.stale .pin{filter:grayscale(1);opacity:.65}
 </style>
 </head><body>
@@ -620,6 +821,21 @@ function upsert(d){
   p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.ts=d.ts;
   p.marker.setLatLng([d.lat,d.lng]);p.marker.setIcon(iconFor(p));
 }
+var CPCOL={'Equipment Pickup':'#22d3ee','FC Retrieval':'#ec4899','FOB Securement':'#fb923c'}, cpObjs={};
+function drawCps(list){
+  if(!map||!list)return;
+  Object.keys(cpObjs).forEach(function(k){map.removeLayer(cpObjs[k].m);map.removeLayer(cpObjs[k].c)});
+  cpObjs={};
+  list.forEach(function(c){
+    var col=CPCOL[c.type]||'#fff',pts=[];
+    for(var i=0;i<14;i++){var r=i%2?7:15,a=-Math.PI/2+i*Math.PI/7;pts.push((17+r*Math.cos(a)).toFixed(1)+','+(17+r*Math.sin(a)).toFixed(1))}
+    var svg='<svg width="34" height="34" viewBox="0 0 34 34"><polygon points="'+pts.join(' ')+'" fill="'+col+'" stroke="#fff" stroke-width="1.5"/></svg>';
+    var ic=L.divIcon({className:'cpmk',html:svg+'<div class="cplbl">'+esc(c.name)+'</div>',iconSize:[34,34],iconAnchor:[17,17]});
+    var circ=L.circle([c.lat,c.lng],{radius:c.radius,color:col,weight:2,opacity:.9,fillOpacity:.12,interactive:false}).addTo(map);
+    var mk=L.marker([c.lat,c.lng],{icon:ic,interactive:false,zIndexOffset:-500}).addTo(map);
+    cpObjs[c.id]={m:mk,c:circ};
+  });
+}
 function drop(pidX){if(ppl[pidX]){map.removeLayer(ppl[pidX].marker);delete ppl[pidX]}}
 function clearAll(){Object.keys(ppl).forEach(drop)}
 function count(){var n=Object.keys(ppl).length;$('lt').textContent='Sharing live · '+n+' on map'}
@@ -650,6 +866,7 @@ function connect(){
   es.onerror=function(){$('dot').className='off'};
   es.addEventListener('snapshot',function(m){
     var d=JSON.parse(m.data);skew=d.now-Date.now();clearAll();
+    drawCps(d.checkpoints);
     d.people.forEach(upsert);
     if(!fitted&&d.people.length){fit();fitted=true}
     count();
@@ -660,6 +877,7 @@ function connect(){
     if(!fitted){fit();fitted=true}
     count();
   });
+  es.addEventListener('cps',function(m){drawCps(JSON.parse(m.data).checkpoints)});
   es.addEventListener('ended',function(){stopSharing(true);$('ev').textContent='Activity ended';status('The host ended this activity.')});
 }
 setInterval(function(){if(map)Object.keys(ppl).forEach(function(k){ppl[k].marker.setIcon(iconFor(ppl[k]))})},5000);
@@ -742,9 +960,12 @@ function api(req, res, id, action, u) {
     res.write('retry: 3000\n\n');
     const people = [...ev.people.values()]
       .filter(p => host || !p.stopped)
-      .map(p => host ? Object.assign(pub(p), { trail: (p.trail || []).map(x => [x[0], x[1]]) }) : pub(p));
-    res.write('event: snapshot\ndata: ' + JSON.stringify({ name: ev.name, people, now: Date.now() }) + '\n\n');
+      .map(p => host ? Object.assign(pub(p, true), { trail: (p.trail || []).map(x => [x[0], x[1]]) }) : pub(p, false));
+    const snap = { name: ev.name, people, now: Date.now() };
+    if (host) snap.checkpoints = pubCps(ev);
+    res.write('event: snapshot\ndata: ' + JSON.stringify(snap) + '\n\n');
     res._pid = host ? null : spid;
+    res._host = host;
     ev.clients.add(res);
     const ka = setInterval(() => res.write(': ka\n\n'), 20000);
     req.on('close', () => { clearInterval(ka); ev.clients.delete(res); });
@@ -778,11 +999,19 @@ function api(req, res, id, action, u) {
         movedM = dist(lg.lat, lg.lng, lat, lng);
         if (wasStopped) logType = 'Resumed';
         else if (movedM >= MOVE_M) logType = 'Moved';
-        else if (now - lg.ts >= CHECKPOINT_MS) logType = 'Checkpoint';
+        else if (now - lg.ts >= UPDATE_MS) logType = 'Update';
       }
-      if (logType) {
+      // checkpoint geofence: arriving at / leaving a marked location is always logged
+      const prevCp = p.cp || null, newCp = cpAt(ev, p, lat, lng);
+      const cpChanged = prevCp !== newCp;
+      if (logType || cpChanged) {
         lg.total += movedM; lg.ts = now; lg.lat = lat; lg.lng = lng;
-        logRow(ev, p, logType, movedM);
+      }
+      p.cp = newCp;
+      if (logType) logRow(ev, p, logType, movedM, newCp);
+      if (cpChanged) {
+        if (prevCp) logRow(ev, p, 'Left', logType ? 0 : movedM, prevCp);
+        if (newCp) logRow(ev, p, 'Arrived', logType || prevCp ? 0 : movedM, newCp);
       }
       const last = p.trail[p.trail.length - 1];
       let pt = false;
@@ -791,7 +1020,7 @@ function api(req, res, id, action, u) {
         if (p.trail.length > MAX_TRAIL) p.trail.shift();
       }
       ev.last = now; dirty = true;
-      broadcast(ev, 'loc', Object.assign(pub(p), { pt, now }));
+      broadcastLoc(ev, p, { pt, now });
       res.writeHead(204); res.end();
     });
   }
@@ -803,11 +1032,50 @@ function api(req, res, id, action, u) {
       if (p && p.lat !== undefined) {
         if (!p.stopped) { p.ts = Date.now(); logRow(ev, p, 'Stopped', 0); }
         p.stopped = true; ev.last = Date.now(); dirty = true;
-        broadcast(ev, 'loc', Object.assign(pub(p), { pt: false, now: Date.now() }));
+        broadcastLoc(ev, p, { pt: false, now: Date.now() });
         // someone who stops sharing also stops seeing everyone else
         for (const c of [...ev.clients]) if (c._pid === p.pid) { ev.clients.delete(c); c.end(); }
       }
       res.writeHead(204); res.end();
+    });
+  }
+
+  // host only: the in-app log (JSON, or ?format=csv to download)
+  if (action === 'log' && m === 'GET') {
+    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    if (u.searchParams.get('format') === 'csv') {
+      const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+      const lines = ['Time,Person,Event,Checkpoint,Latitude,Longitude,Accuracy (m),Moved (m),Total (m)'];
+      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.type), q(e.checkpoint), e.lat, e.lng, e.acc == null ? '' : e.acc, e.moved, e.total].join(','));
+      res.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store',
+        'Content-Disposition': 'attachment; filename="activity-log-' + ev.id + '.csv"'
+      });
+      return res.end(lines.join('\n'));
+    }
+    return json(res, 200, { log: ev.log, checkpoints: pubCps(ev) });
+  }
+
+  // host only: move a checkpoint / change its radius
+  if (action === 'checkpoints' && m === 'POST') {
+    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    return readJson(req, (err, b) => {
+      if (err) return json(res, 400, { error: 'bad json' });
+      const c = ev.checkpoints.find(x => x.id === String(b.id || ''));
+      if (!c) return json(res, 404, { error: 'no such checkpoint' });
+      const lat = Number(b.lat), lng = Number(b.lng), radius = Number(b.radius);
+      if (b.lat !== undefined) {
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return json(res, 400, { error: 'bad position' });
+        c.lat = lat; c.lng = lng;
+      }
+      if (b.radius !== undefined) {
+        if (!Number.isFinite(radius) || radius < 10 || radius > 1000) return json(res, 400, { error: 'radius must be 10-1000 m' });
+        c.radius = Math.round(radius);
+      }
+      dirty = true;
+      broadcast(ev, 'cps', { checkpoints: pubCps(ev) }, true);
+      syncCheckpointsToSheet(ev);
+      json(res, 200, { ok: true });
     });
   }
 
@@ -846,18 +1114,24 @@ const server = http.createServer((req, res) => {
         id, name: String(b.name || 'Activity').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) || 'Activity',
         token: crypto.randomBytes(16).toString('hex'), created: Date.now(), last: Date.now(),
         shared: b.shared === true,
+        checkpoints: cloneCheckpoints(), log: [],
         people: new Map(), clients: new Set()
       };
       events.set(id, ev); dirty = true;
+      syncCheckpointsToSheet(ev);
       json(res, 200, { id, token: ev.token });
     });
   }
 
-  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop))?$/))) return api(req, res, r[1], r[2], u);
+  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints))?$/))) return api(req, res, r[1], r[2], u);
 
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('Not found');
 });
 
 server.listen(PORT, () => console.log('Activity Tracker running on http://localhost:' + PORT));
-process.on('SIGTERM', () => { dirty = true; save(); flushSheet().finally(() => process.exit(0)); setTimeout(() => process.exit(0), 4000).unref(); });
+process.on('SIGTERM', () => {
+  dirty = true; save(true); // write to disk before anything else, synchronously
+  setTimeout(() => process.exit(0), 4000).unref();
+  flushSheet().finally(() => process.exit(0)); // then try to send any rows still queued for the sheet
+});
