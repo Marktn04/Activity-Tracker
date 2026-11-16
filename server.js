@@ -633,7 +633,6 @@ ${BASE_CSS}
 .pc .ok{background:#14532d;border-color:#22c55e;color:#bbf7d0}
 .pc .no{background:#7f1d1d;border-color:#ef4444;color:#fecaca}
 .pc.acctno{border-left-color:#ef4444!important}.pc.acctok{border-left-color:#22c55e!important}
-.pc .pdo2{margin:3px 0 0 22px;font-size:12px;color:#c4b5fd;opacity:.85;line-height:1.35}
 .pc .pdo{margin:5px 0 0 22px;font-size:13px;color:#ddd6fe;font-weight:600}
 .cpop .pup{margin-top:8px;padding-top:7px;border-top:1px solid #e2e8f0}.cpop .ph{font-weight:800;font-size:14px;color:#5b21b6}
 #guidep{position:absolute;inset:0;z-index:3000;background:#0f172a;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
@@ -1041,9 +1040,6 @@ function draw(){
     w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'')+(p.call?' · last radio call '+agoTxt(age(p.call)):' · no radio call yet');
     r.appendChild(w);
     if(p.doing&&st!=='stopped'){var dg=document.createElement('div');dg.className='pdo';dg.textContent=p.doing;r.appendChild(dg)}
-    if(cpData.length&&st!=='stopped'){var OB=[['sunken','Ammo'],['cto','Med kits'],['sculpt','Rucks/staffs'],['sage','Rescue'],['drake','Final base']];
-      var ot=OB.filter(function(o){return cpData.some(function(c){return c.id===o[0]})}).map(function(o){return (p.visits&&p.visits[o[0]]?'\u2713 ':'')+o[1]}).join(' \u00B7 ');
-      if(ot){var og=document.createElement('div');og.className='pdo2';og.textContent='Objectives: '+ot;r.appendChild(og)}}
     r.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
     box.appendChild(r);
   });
@@ -1198,7 +1194,7 @@ function wav(){
   function s(o,t){for(var i=0;i<t.length;i++)b[o+i]=t.charCodeAt(i)}
   s(0,'RIFF');v.setUint32(4,36+n,true);s(8,'WAVE');s(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
   v.setUint32(24,8000,true);v.setUint32(28,8000,true);v.setUint16(32,1,true);v.setUint16(34,8,true);s(36,'data');v.setUint32(40,n,true);
-  for(var i=0;i<n;i++)b[44+i]=(Math.floor(i/50)%2)?129:127;
+  for(var i=0;i<n;i++)b[44+i]=(Math.floor(i/50)%2)?129:127;   // barely-there tone: some phones only keep the page alive for audio that isn't pure silence
   return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
 }
 function keepAlive(on){
