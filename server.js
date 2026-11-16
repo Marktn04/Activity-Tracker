@@ -153,6 +153,9 @@ function load() {
         people: new Map(e.people.map(p => [p.pid, p])), clients: new Set()
       });
     }
+    for (const ev of events.values()) for (const en of ev.log) {   // restore each person's last radio call-in
+      if (en.type === 'Call-in') { const p = ev.people.get(en.pid); if (p && !(p.lastCall > en.ts)) p.lastCall = en.ts; }
+    }
   } catch (_) { /* first run */ }
 }
 function save(sync) {
@@ -234,6 +237,7 @@ function pub(p, host, ev) {
     o.total = Math.round((p.lg && p.lg.total) || 0);
     o.visits = p.visits || {};
     o.where = ev ? statusText(ev, p, null) : '';
+    o.call = p.lastCall || 0;   // last radio call-in (host / view-only only)
     o.doing = ev ? doingText(ev, p) : '';   // purpose: HOST / VIEW-ONLY ONLY, never in the participant payload
   }
   return o;
@@ -253,6 +257,7 @@ function doingText(ev, p) {
 }
 /* The "Purpose" line on a log entry, plus a heads-up if the flight seems out of the expected order. */
 function purposeNote(ev, p, type, cpId) {
+  if (type === 'Call-in') return '';
   if (!cpId || !PURPOSES[cpId]) return '';
   let s = purposeFor(cpId, p);
   const vs = p.visits || {};
@@ -338,6 +343,7 @@ function eventText(type, entry) {
     case 'Joined': return 'Started sharing location';
     case 'Resumed': return 'Resumed sharing location';
     case 'Stopped': return 'Stopped sharing location';
+    case 'Call-in': return 'Called in by radio';
     case 'Lost signal': return 'No location update for 2+ minutes';
     case 'Back online': return 'Location updates are back';
     default: return 'Standing still';
@@ -618,6 +624,9 @@ ${BASE_CSS}
 .le .st{color:#7dd3fc;font-size:14px;margin-top:3px;font-weight:600}.le .st.at{color:#4ade80}
 .le .pur{margin-top:4px;font-size:13.5px;color:#e2e8f0;background:#1e293b;border-left:3px solid #a78bfa;padding:5px 9px;border-radius:0 8px 8px 0;line-height:1.35}
 .le .pur b{color:#c4b5fd}.le .pur.warn{border-left-color:#f97316;background:#431407}.le .pur.warn b{color:#fdba74}
+.pc .cb{flex:none;font-size:12px;padding:2px 7px;border-radius:10px;border:1px solid #475569;background:transparent;color:#e2e8f0;cursor:pointer}
+.pc .cb.just{background:#5b21b6;border-color:#5b21b6}
+.pc .pdo2{margin:3px 0 0 22px;font-size:12px;color:#c4b5fd;opacity:.85;line-height:1.35}
 .pc .pdo{margin:5px 0 0 22px;font-size:13px;color:#ddd6fe;font-weight:600}
 .cpop .pup{margin-top:8px;padding-top:7px;border-top:1px solid #e2e8f0}.cpop .ph{font-weight:800;font-size:14px;color:#5b21b6}
 #guidep{position:absolute;inset:0;z-index:3000;background:#0f172a;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
@@ -629,7 +638,7 @@ ${BASE_CSS}
 #guideb .tl{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #1e293b;font-size:15px}
 #guideb .tl span:first-child{flex:none;width:84px;font-weight:700;color:#7dd3fc}
 .le .tag{display:inline-block;font-size:12px;font-weight:700;padding:1px 7px;border-radius:8px;margin-right:6px;background:#334155;color:#e2e8f0}
-.le .tag.Lostsignal{background:#9a3412;color:#ffedd5}.le .tag.Backonline{background:#1e40af;color:#dbeafe}
+.le .tag.Call-in{background:#5b21b6;color:#ede9fe}.le .tag.Lostsignal{background:#9a3412;color:#ffedd5}.le .tag.Backonline{background:#1e40af;color:#dbeafe}
 .le .tag.Arrived{background:#166534;color:#dcfce7}.le .tag.Left{background:#92400e;color:#fef3c7}.le .tag.Stopped{background:#7f1d1d;color:#fee2e2}
 #toast{position:absolute;left:50%;top:90px;transform:translateX(-50%);z-index:2000;background:#111827;color:#fff;padding:8px 14px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.on{opacity:1}
@@ -682,7 +691,7 @@ ${BASE_CSS}
     <div id="logh">
       <b>Activity log <span id="logn" style="font-weight:400;color:#94a3b8;font-size:14px"></span></b>
       <select id="logperson"><option value="">Everyone</option></select>
-      <select id="logf"><option value="all">All events</option><option value="cp">Checkpoints only</option><option value="problems">Problems (no signal / stopped)</option></select>
+      <select id="logf"><option value="all">All events</option><option value="cp">Checkpoints only</option><option value="calls">Radio call-ins</option><option value="problems">Problems (no signal / stopped)</option></select>
       <a id="logcsv" class="btn sm sec" href="#">Download CSV</a>
       <button id="logx" class="btn sm">Close</button>
     </div>
@@ -783,7 +792,7 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
@@ -862,6 +871,7 @@ function logText(e){
     case 'Moved':return 'moved '+e.moved+' m'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Joined':return 'started sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Resumed':return 'resumed sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    case 'Call-in':return 'called in by radio'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Lost signal':return 'has no signal (no update for 2+ min)';
     case 'Back online':return 'is back online';
     case 'Stopped':return 'stopped sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
@@ -875,6 +885,7 @@ function renderLog(){
   var rows=logData.filter(function(e){
     if(who&&e.pid!==who)return false;
     if(f==='cp')return e.type==='Arrived'||e.type==='Left';
+    if(f==='calls')return e.type==='Call-in';
     if(f==='problems')return e.type==='Lost signal'||e.type==='Back online'||e.type==='Stopped';
     return true;
   });
@@ -1005,14 +1016,22 @@ function draw(){
     var bd=document.createElement('span');bd.className='bd';
     bd.textContent=st==='at'?'At '+cpNameOf(p.cp):st==='enroute'?'En route':st==='lost'?'No signal '+agoTxt(age(p.ts)).replace(' ago',''):'Stopped sharing';
     top.appendChild(c);top.appendChild(nm);top.appendChild(bd);
+    if(!VIEW){var cb=document.createElement('button');cb.className='cb';cb.textContent='\uD83D\uDCFB';cb.title='Log radio call-in';
+      cb.onclick=function(e){e.stopPropagation();cb.disabled=true;
+        fetch('/api/e/'+ev.id+'/callin?t='+ev.token,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:k})})
+          .then(function(r){if(!r.ok)throw 0;toast('Call-in logged: '+p.name)}).catch(function(){toast('Could not log call-in')}).then(function(){cb.disabled=false})};
+      top.appendChild(cb)}
     if(cpData.length){var nd=0;cpData.forEach(function(cp){if(p.visits&&p.visits[cp.id])nd++});
       var pg=document.createElement('button');pg.className='pg'+(nd===cpData.length?' all':'');pg.textContent='\u2713 '+nd+'/'+cpData.length;pg.title='Flight progress';
       pg.onclick=function(e){e.stopPropagation();showProg(k)};top.appendChild(pg)}
     r.appendChild(top);
     var w=document.createElement('div');w.className='pw';
-    w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'');
+    w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'')+(p.call?' · radio '+agoTxt(age(p.call)):' · no radio call yet');
     r.appendChild(w);
     if(p.doing&&st!=='stopped'){var dg=document.createElement('div');dg.className='pdo';dg.textContent=p.doing;r.appendChild(dg)}
+    if(cpData.length&&st!=='stopped'){var OB=[['sunken','Ammo'],['cto','Med kits'],['sculpt','Rucks/staffs'],['sage','Rescue'],['drake','Final base']];
+      var ot=OB.filter(function(o){return cpData.some(function(c){return c.id===o[0]})}).map(function(o){return (p.visits&&p.visits[o[0]]?'\u2713 ':'')+o[1]}).join(' \u00B7 ');
+      if(ot){var og=document.createElement('div');og.className='pdo2';og.textContent='Objectives: '+ot;r.appendChild(og)}}
     r.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
     box.appendChild(r);
   });
@@ -1482,6 +1501,21 @@ function api(req, res, id, action, u) {
     return json(res, 200, { log: ev.log, checkpoints: pubCps(ev) });
   }
 
+  // host only: log that a flight / person called in on the radio
+  if (action === 'callin' && m === 'POST') {
+    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    return readJson(req, (err, b) => {
+      if (err) return json(res, 400, { error: 'bad json' });
+      const p = ev.people.get(String((b && b.pid) || ''));
+      if (!p || p.lat == null) return json(res, 404, { error: 'unknown person' });
+      const now = Date.now();
+      p.lastCall = now; ev.last = now; dirty = true;
+      logRow(ev, p, 'Call-in', 0, p.cp, now);
+      broadcastLoc(ev, p, { pt: false, now });
+      json(res, 200, { ok: true, ts: now });
+    });
+  }
+
   // host only: replace the view-only link (the old one stops working at once)
   if (action === 'viewlink' && m === 'POST') {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
@@ -1567,7 +1601,7 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints|viewlink))?$/))) return api(req, res, r[1], r[2], u);
+  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints|viewlink|callin))?$/))) return api(req, res, r[1], r[2], u);
 
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('Not found');
