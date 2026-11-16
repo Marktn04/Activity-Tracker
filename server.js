@@ -237,6 +237,7 @@ function pub(p, host, ev) {
     o.total = Math.round((p.lg && p.lg.total) || 0);
     o.visits = p.visits || {};
     o.where = ev ? statusText(ev, p, null) : '';
+    o.acct = !!p.acct;
     o.call = p.lastCall || 0;   // last radio call-in (host / view-only only)
     o.doing = ev ? doingText(ev, p) : '';   // purpose: HOST / VIEW-ONLY ONLY, never in the participant payload
   }
@@ -338,12 +339,12 @@ function personState(p) { return p.stopped ? 'Stopped' : (p.lost ? 'No signal' :
 function eventText(type, entry) {
   switch (type) {
     case 'Arrived': return entry.visit > 1 ? 'Arrived at ' + entry.checkpoint + ' again (visit ' + entry.visit + ')' : 'Arrived at ' + entry.checkpoint;
-    case 'Left': return 'Left ' + entry.checkpoint;
+    case 'Left': return 'Left ' + entry.checkpoint + (entry.reset ? ' (accountability reset)' : '');
     case 'Moved': return 'Moved ' + entry.moved + ' m';
     case 'Joined': return 'Started sharing location';
     case 'Resumed': return 'Resumed sharing location';
     case 'Stopped': return 'Stopped sharing location';
-    case 'Call-in': return 'Called in by radio';
+    case 'Call-in': return 'Radioed in: ACCOUNTED FOR';
     case 'Lost signal': return 'No location update for 2+ minutes';
     case 'Back online': return 'Location updates are back';
     default: return 'Standing still';
@@ -361,6 +362,7 @@ function logRow(ev, p, type, moved, checkpointId, tsOverride) {
     nearest: nc ? nc.name : '', nearDist: nc ? nc.d : null, toward: nc ? nc.toward : null
   };
   if (type === 'Arrived') entry.visit = (p.visits && p.visits[cpId] && p.visits[cpId].count) || 1;
+  if (type === 'Left') { entry.reset = !!p.acct; p.acct = false; }   // leaving the circle resets accountability
   entry.status = statusText(ev, p, type, entry.checkpoint);
   entry.purpose = purposeNote(ev, p, type, cpId);   // host / view-only only (the log is never sent to participants)
   entry.text = eventText(type, entry);
@@ -568,7 +570,8 @@ ${BASE_CSS}
 .pc.at{border-left-color:#22c55e}
 .pc.enroute{border-left-color:#38bdf8}
 .pc.stopped{border-left-color:#64748b;opacity:.7}
-.pc .pt{display:flex;align-items:center;gap:8px}
+.pc .pt{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap}
+.pc .pt .n{flex:1 1 60px;min-width:50px}
 .pc .c{width:14px;height:14px;border-radius:50%;flex:none}
 .pc .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;font-size:16px}
 .pc .pg{flex:none;font-size:12px;font-weight:700;padding:2px 9px;border-radius:10px;border:1px solid #6d28d9;background:transparent;color:#ddd6fe;cursor:pointer}
@@ -625,7 +628,11 @@ ${BASE_CSS}
 .le .pur{margin-top:4px;font-size:13.5px;color:#e2e8f0;background:#1e293b;border-left:3px solid #a78bfa;padding:5px 9px;border-radius:0 8px 8px 0;line-height:1.35}
 .le .pur b{color:#c4b5fd}.le .pur.warn{border-left-color:#f97316;background:#431407}.le .pur.warn b{color:#fdba74}
 .pc .cb{flex:none;font-size:12px;padding:2px 7px;border-radius:10px;border:1px solid #475569;background:transparent;color:#e2e8f0;cursor:pointer}
-.pc .cb.just{background:#5b21b6;border-color:#5b21b6}
+.pc .cb,.pc .ac{font-weight:700;white-space:nowrap}
+.pc .ac{flex:none;font-size:12px;padding:2px 8px;border-radius:10px;border:1px solid}
+.pc .ok{background:#14532d;border-color:#22c55e;color:#bbf7d0}
+.pc .no{background:#7f1d1d;border-color:#ef4444;color:#fecaca}
+.pc.acctno{border-left-color:#ef4444!important}.pc.acctok{border-left-color:#22c55e!important}
 .pc .pdo2{margin:3px 0 0 22px;font-size:12px;color:#c4b5fd;opacity:.85;line-height:1.35}
 .pc .pdo{margin:5px 0 0 22px;font-size:13px;color:#ddd6fe;font-weight:600}
 .cpop .pup{margin-top:8px;padding-top:7px;border-top:1px solid #e2e8f0}.cpop .ph{font-weight:800;font-size:14px;color:#5b21b6}
@@ -782,7 +789,8 @@ function initMap(){
 function stateOf(p){return p.stopped?'stopped':(age(p.ts)>90?'stale':'live')}
 function iconFor(p){
   var st=stateOf(p), ini=esc((p.name||'?').trim().charAt(0).toUpperCase()||'?');
-  var html='<div class="pin" style="background:'+color(p.pid)+'">'+ini+'</div><div class="lbl">'+esc(p.name)+(st==='stopped'?' (stopped)':'')+'</div>';
+  var ring=st==='stopped'?'#fff':(p.acct?'#22c55e':'#ef4444');
+  var html='<div class="pin" style="background:'+color(p.pid)+';border-color:'+ring+';box-shadow:0 0 0 2px '+ring+',0 1px 6px rgba(0,0,0,.5)">'+ini+'</div><div class="lbl">'+esc(p.name)+(st==='stopped'?' (stopped)':'')+'</div>';
   return L.divIcon({className:'mk'+(st!=='live'?' stale':''),html:html,iconSize:[0,0]});
 }
 function upsert(d,appendPt,trail){
@@ -792,7 +800,7 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;p.acct=!!d.acct;
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
@@ -867,11 +875,11 @@ function fmtT(ts){return new Date(ts).toLocaleString([],{month:'short',day:'nume
 function logText(e){
   switch(e.type){
     case 'Arrived':return e.visit>1?'arrived at '+e.checkpoint+' again (visit '+e.visit+')':'arrived at '+e.checkpoint;
-    case 'Left':return 'left '+e.checkpoint;
+    case 'Left':return 'left '+e.checkpoint+(e.reset?' (accountability reset)':'');
     case 'Moved':return 'moved '+e.moved+' m'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Joined':return 'started sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Resumed':return 'resumed sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
-    case 'Call-in':return 'called in by radio'+(e.checkpoint?' (at '+e.checkpoint+')':'');
+    case 'Call-in':return 'radioed in: ACCOUNTED FOR'+(e.checkpoint?' (at '+e.checkpoint+')':'');
     case 'Lost signal':return 'has no signal (no update for 2+ min)';
     case 'Back online':return 'is back online';
     case 'Stopped':return 'stopped sharing'+(e.checkpoint?' (at '+e.checkpoint+')':'');
@@ -1016,17 +1024,21 @@ function draw(){
     var bd=document.createElement('span');bd.className='bd';
     bd.textContent=st==='at'?'At '+cpNameOf(p.cp):st==='enroute'?'En route':st==='lost'?'No signal '+agoTxt(age(p.ts)).replace(' ago',''):'Stopped sharing';
     top.appendChild(c);top.appendChild(nm);top.appendChild(bd);
-    if(!VIEW){var cb=document.createElement('button');cb.className='cb';cb.textContent='\uD83D\uDCFB';cb.title='Log radio call-in';
-      cb.onclick=function(e){e.stopPropagation();cb.disabled=true;
-        fetch('/api/e/'+ev.id+'/callin?t='+ev.token,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:k})})
-          .then(function(r){if(!r.ok)throw 0;toast('Call-in logged: '+p.name)}).catch(function(){toast('Could not log call-in')}).then(function(){cb.disabled=false})};
-      top.appendChild(cb)}
+    var acs=st==='stopped'?'':(p.acct?'ok':'no'), atxt=p.acct?'\u2713 Accounted':'\u2717 Not accounted';
+    if(acs){
+      if(!VIEW){var cb=document.createElement('button');cb.className='cb '+acs;cb.textContent='\uD83D\uDCFB '+atxt;cb.title='Tap when the flight radios in: everyone accounted for';
+        cb.onclick=function(e){e.stopPropagation();cb.disabled=true;
+          fetch('/api/e/'+ev.id+'/callin?t='+ev.token,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:k})})
+            .then(function(r){if(!r.ok)throw 0;toast('Accounted for: '+p.name)}).catch(function(){toast('Could not log call-in')}).then(function(){cb.disabled=false})};
+        top.appendChild(cb)}
+      else{var ac=document.createElement('span');ac.className='ac '+acs;ac.textContent=atxt;top.appendChild(ac)}
+      r.className+=' acct'+acs}
     if(cpData.length){var nd=0;cpData.forEach(function(cp){if(p.visits&&p.visits[cp.id])nd++});
       var pg=document.createElement('button');pg.className='pg'+(nd===cpData.length?' all':'');pg.textContent='\u2713 '+nd+'/'+cpData.length;pg.title='Flight progress';
       pg.onclick=function(e){e.stopPropagation();showProg(k)};top.appendChild(pg)}
     r.appendChild(top);
     var w=document.createElement('div');w.className='pw';
-    w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'')+(p.call?' · radio '+agoTxt(age(p.call)):' · no radio call yet');
+    w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'')+(p.call?' · last radio call '+agoTxt(age(p.call)):' · no radio call yet');
     r.appendChild(w);
     if(p.doing&&st!=='stopped'){var dg=document.createElement('div');dg.className='pdo';dg.textContent=p.doing;r.appendChild(dg)}
     if(cpData.length&&st!=='stopped'){var OB=[['sunken','Ammo'],['cto','Med kits'],['sculpt','Rucks/staffs'],['sage','Rescue'],['drake','Final base']];
@@ -1509,7 +1521,7 @@ function api(req, res, id, action, u) {
       const p = ev.people.get(String((b && b.pid) || ''));
       if (!p || p.lat == null) return json(res, 404, { error: 'unknown person' });
       const now = Date.now();
-      p.lastCall = now; ev.last = now; dirty = true;
+      p.lastCall = now; p.acct = true; ev.last = now; dirty = true;
       logRow(ev, p, 'Call-in', 0, p.cp, now);
       broadcastLoc(ev, p, { pt: false, now });
       json(res, 200, { ok: true, ts: now });
