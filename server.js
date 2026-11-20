@@ -245,6 +245,7 @@ function pub(p, host, ev) {
     o.where = ev ? statusText(ev, p, null) : '';
     o.acct = !!p.acct;
     o.fob = p.fobRank || 0;
+    o.fobTs = p.fobTs || 0;
     o.due = p.callDue || 0;
     o.call = p.lastCall || 0;   // last radio call-in (host / view-only only)
     o.doing = ev ? doingText(ev, p) : '';   // purpose: HOST / VIEW-ONLY ONLY, never in the participant payload
@@ -360,6 +361,7 @@ function eventText(type, entry) {
   }
 }
 /* One event -> the in-app log (host panel) AND the spreadsheet queue. checkpointId: the checkpoint it is about. */
+const VIEWER_HIDDEN = new Set(['Lost signal', 'Back online', 'Stopped']);
 function logRow(ev, p, type, moved, checkpointId, tsOverride) {
   const nc = p.nearCur;
   const cpId = checkpointId !== undefined ? checkpointId : p.cp;
@@ -384,7 +386,11 @@ function logRow(ev, p, type, moved, checkpointId, tsOverride) {
   entry.state = type === 'Stopped' ? 'Stopped' : (type === 'Lost signal' ? 'No signal' : 'Sharing');
   ev.log.push(entry);
   if (ev.log.length > MAX_LOG) ev.log.splice(0, ev.log.length - MAX_LOG);
-  broadcast(ev, 'log', entry, true);
+  for (const c of ev.clients) {   // host sees everything; view-only never sees who goes offline
+    if (!c._host) continue;
+    if (c._viewer && VIEWER_HIDDEN.has(type)) continue;
+    c.write('event: log\ndata: ' + JSON.stringify(entry) + '\n\n');
+  }
   if (!SHEET_URL) return;
   // for the spreadsheet's per-person board: the first arrival time at every checkpoint, in checkpoint order
   const visits = ev.checkpoints.map(c => {
@@ -733,7 +739,7 @@ function agoTxt(s){if(s<60)return s+'s ago';var m=Math.round(s/60);if(m<60)retur
 function toast(t){var e=$('toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(function(){e.classList.remove('on')},2200)}
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});
 
-var ev=null, map=null, people={}, es=null, showTrails=true, fitted=false, drawn=false;
+var ev=null, map=null, people={}, es=null, showTrails=!/^\/v\//.test(location.pathname), fitted=false, drawn=false;
 function lsGet(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 
@@ -801,10 +807,10 @@ function initMap(){
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
 }
 
-function stateOf(p){return p.stopped?'stopped':(age(p.ts)>90?'stale':'live')}
+function stateOf(p){return p.stopped?'stopped':((!VIEW&&age(p.ts)>90)?'stale':'live')}
 function iconFor(p){
   var st=stateOf(p), ini=esc((p.name||'?').trim().charAt(0).toUpperCase()||'?');
-  var ring=st==='stopped'?'#fff':(p.acct?'#22c55e':'#ef4444');
+  var ring=(VIEW||st==='stopped')?'#fff':(p.acct?'#22c55e':'#ef4444');
   var html='<div class="pin" style="background:'+color(p.pid)+';border-color:'+ring+';box-shadow:0 0 0 2px '+ring+',0 1px 6px rgba(0,0,0,.5)">'+ini+'</div><div class="lbl">'+esc(p.name)+(st==='stopped'?' (stopped)':'')+'</div>';
   return L.divIcon({className:'mk'+(st!=='live'?' stale':''),html:html,iconSize:[0,0]});
 }
@@ -815,7 +821,7 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;p.acct=!!d.acct;p.fob=d.fob||0;p.due=d.due||0;
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;p.acct=!!d.acct;p.fob=d.fob||0;p.fobTs=d.fobTs||0;p.due=d.due||0;
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
@@ -829,11 +835,20 @@ function showProg(k){
   var h=document.createElement('h3');h.textContent=p.name+' \u2013 progress';box.appendChild(h);
   var ORD=['sunken','cto','sculpt','sage','drake'];
   cpData.slice().sort(function(a,b){var x=ORD.indexOf(a.id),y=ORD.indexOf(b.id);return (x<0?9:x)-(y<0?9:y)}).forEach(function(cp){
-    var v=p.visits&&p.visits[cp.id],r=document.createElement('div');r.className='pr'+(v?' d':'');
+    var v=p.visits&&p.visits[cp.id];if(cp.id==='drake')v=p.fob?{first:p.fobTs||v&&v.last}:null;
+    var r=document.createElement('div');r.className='pr'+(v?' d':'');
     var i=document.createElement('i');i.textContent=v?'\u2713':'';
     var n=document.createElement('span');n.textContent=cp.headline||cp.label||cp.name;
     var t=document.createElement('span');t.className='t';t.textContent=v?new Date(v.first).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):(p.cp===cp.id?'here now':'');
     r.appendChild(i);r.appendChild(n);r.appendChild(t);box.appendChild(r)});
+  if(!VIEW){var rm=document.createElement('button');rm.textContent='Remove this flight from the list';
+    rm.style.cssText='margin-top:14px;width:100%;padding:11px;border-radius:12px;border:1px solid #7f1d1d;background:transparent;color:#fca5a5;font-size:14px;font-weight:600';
+    rm.onclick=function(){
+      if(!rm.dataset.sure){rm.dataset.sure='1';rm.textContent='Tap again to remove '+p.name+' (they reappear if still sharing)';rm.style.background='#7f1d1d';rm.style.color='#fff';return}
+      rm.disabled=true;
+      fetch('/api/e/'+ev.id+'/remove?t='+ev.token,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:k})})
+        .then(function(r){if(!r.ok)throw 0;toast('Removed '+p.name)}).catch(function(){toast('Could not remove');rm.disabled=false})};
+    box.appendChild(rm)}
   $('progp').classList.remove('hidden')}
 $('progp').onclick=function(e){if(e.target===this)this.classList.add('hidden')};
 function cpNameOf(id){for(var i=0;i<cpData.length;i++)if(cpData[i].id===id)return cpData[i].name;return ''}
@@ -995,7 +1010,7 @@ function connect(){
     var e=JSON.parse(m.data);pushLog(e);
     if(e.type==='Arrived')toast(e.person+' arrived at '+e.checkpoint);
     else if(e.type==='Left')toast(e.person+' left '+e.checkpoint);
-    else if(e.type==='Lost signal')toast('⚠ '+e.person+' has no signal');
+    else if(e.type==='Lost signal'&&!VIEW)toast('⚠ '+e.person+' has no signal');
     else if(e.type==='Back online')toast(e.person+' is back online');
   });
   es.addEventListener('loc',function(m){
@@ -1004,6 +1019,10 @@ function connect(){
     if(!fitted){fit();fitted=true}
     else if(first)toast(d.name+' joined');
     render();
+  });
+  es.addEventListener('removed',function(m){
+    var d=JSON.parse(m.data),p=people[d.pid];
+    if(p){map.removeLayer(p.marker);map.removeLayer(p.line);delete people[d.pid];$('progp').classList.add('hidden');render()}
   });
   es.addEventListener('ended',function(){es.close();toast('Activity ended');forget(ev.id)});
   es.addEventListener('revoked',function(){es.close();viewerFail('The host replaced this view-only link. Ask them for the new one.')});
@@ -1021,7 +1040,16 @@ var rq=0;
 function render(){ if(rq)return; rq=requestAnimationFrame(function(){rq=0;draw()}) }
 var LOSTS=120;
 function overdue(p){return !!(p.due&&(p.call||0)<p.due&&age(p.due)>180)}
-function pstate(p){if(p.stopped)return 'stopped';if(p.lost||age(p.ts)>LOSTS)return 'lost';return p.cp?'at':'enroute'}
+function pstate(p){if(p.stopped)return 'stopped';if(!VIEW&&(p.lost||age(p.ts)>LOSTS))return 'lost';return p.cp?'at':'enroute'}
+var EQ=['sunken','cto','sculpt'];
+function questCount(p){var v=p.visits||{},n=0;EQ.forEach(function(i){if(v[i])n++});if(v.sage)n++;if(p.fob)n++;return n}
+function nextText(p){
+  var v=p.visits||{},rem=EQ.filter(function(i){return !v[i]&&cpData.some(function(c){return c.id===i})});
+  if(rem.length){var nm=rem.map(cpNameOf);return 'Next: '+(nm.length>1?nm.slice(0,-1).join(', ')+' or '+nm[nm.length-1]:nm[0])}
+  if(!v.sage)return 'Next: '+cpNameOf('sage');
+  if(!p.fob)return 'Next: '+cpNameOf('drake')+' (final base)';
+  return 'Mission complete: final base reached';
+}
 function draw(){
   var ids=Object.keys(people),rank={lost:0,at:1,enroute:1,stopped:2},n={at:0,enroute:0,lost:0,stopped:0};
   ids.forEach(function(k){n[pstate(people[k])]++});
@@ -1029,11 +1057,23 @@ function draw(){
   ids.sort(function(a,b){var A=people[a],B=people[b];return (rank[pstate(A)]-rank[pstate(B)])||String(A.name).localeCompare(String(B.name))});
   $('cnt').textContent=' · '+(n.at+n.enroute)+' live'+(n.lost?' · '+n.lost+' no signal':'');
   var nod=ids.filter(function(k){return overdue(people[k])&&pstate(people[k])!=='stopped'}).length;
-  $('shl').textContent=ids.length+' people'+(n.at?' · '+n.at+' at a checkpoint':'')+(n.lost?' · '+n.lost+' NO SIGNAL':'')+(nod?' · '+nod+' RADIO OVERDUE':'');
+  if(VIEW){var nv=ids.filter(function(k){return pstate(people[k])!=='stopped'}).length;$('shl').textContent=nv+' flight'+(nv===1?'':'s');$('cnt').textContent='';}
+  else $('shl').textContent=ids.length+' people'+(n.at?' · '+n.at+' at a checkpoint':'')+(n.lost?' · '+n.lost+' NO SIGNAL':'')+(nod?' · '+nod+' RADIO OVERDUE':'');
   var box=$('list'); box.innerHTML='';
   if(!ids.length){var e=document.createElement('div');e.className='empty';e.textContent='Nobody yet. Tap "Share link" and send it to your group.';box.appendChild(e)}
   ids.forEach(function(k){
     var p=people[k],st=pstate(p);
+    if(VIEW){   // decluttered view: name, quests done out of 5, next location. No offline / stopped / accountability markers.
+      if(st==='stopped')return;
+      var vr=document.createElement('div');vr.className='pc '+st;
+      var vt=document.createElement('div');vt.className='pt';
+      var vc=document.createElement('span');vc.className='c';vc.style.background=color(k);
+      var vn=document.createElement('span');vn.className='n';vn.textContent=p.name;
+      var vq=document.createElement('span');var q=questCount(p);vq.className='pg'+(q===5?' all':'');vq.textContent='\u2713 '+q+'/5';
+      vt.appendChild(vc);vt.appendChild(vn);vt.appendChild(vq);vr.appendChild(vt);
+      if(cpData.length){var vx=document.createElement('div');vx.className='pdo';vx.textContent=nextText(p);vr.appendChild(vx)}
+      vr.onclick=function(){map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17))};
+      box.appendChild(vr);return}
     var r=document.createElement('div');r.className='pc '+st;
     var top=document.createElement('div');top.className='pt';
     var c=document.createElement('span');c.className='c';c.style.background=color(k);
@@ -1051,8 +1091,8 @@ function draw(){
         top.appendChild(cb)}
       else{var ac=document.createElement('span');ac.className='ac '+acs;ac.textContent=atxt;top.appendChild(ac)}
       r.className+=' acct'+acs}
-    if(cpData.length){var nd=0;cpData.forEach(function(cp){if(p.visits&&p.visits[cp.id])nd++});
-      var pg=document.createElement('button');pg.className='pg'+(nd===cpData.length?' all':'');pg.textContent='\u2713 '+nd+'/'+cpData.length;pg.title='Flight progress';
+    if(cpData.length){var nd=questCount(p);
+      var pg=document.createElement('button');pg.className='pg'+(nd===5?' all':'');pg.textContent='\u2713 '+nd+'/5';pg.title='Flight progress';
       pg.onclick=function(e){e.stopPropagation();showProg(k)};top.appendChild(pg)}
     if(p.fob){var fb=document.createElement('span');fb.className='ac '+(p.fob<=2?'ok':'no');fb.textContent=p.fob===1?'FOB 1st in \u2713':p.fob===2?'FOB 2nd in \u2713':'FOB denied \u2717';top.appendChild(fb)}
     r.appendChild(top);
@@ -1064,8 +1104,9 @@ function draw(){
     box.appendChild(r);
   });
 }
-setInterval(function(){if(ev&&map){Object.keys(people).forEach(function(k){people[k].marker.setIcon(iconFor(people[k]))});draw()}},5000);
+setInterval(function(){if(ev&&map){Object.keys(people).forEach(function(k){people[k].marker.setIcon(iconFor(people[k]));if(VIEW)people[k].marker.setOpacity(people[k].stopped?0:1)});draw()}},5000);
 
+if(VIEW)$('trails').textContent='Trails: off';
 $('fit').onclick=fit;
 $('trails').onclick=function(){
   showTrails=!showTrails; $('trails').textContent='Trails: '+(showTrails?'on':'off');
@@ -1207,7 +1248,18 @@ fetch('/api/e/'+ID).then(function(r){return r.ok?r.json():Promise.reject()}).the
   if(lsGet('at_sharing_'+ID)==='1')startSharing(true);
 }).catch(function(){$('ev').textContent='Activity not found';status('This link is no longer active.',true)});
 
-function keepAlive(){}   // no audio: the app makes no sound
+var kaEl=null;
+function silentWav(){var n=8000,b=new Uint8Array(44+n),dv=new DataView(b.buffer);function w(o,t){for(var i=0;i<t.length;i++)b[o+i]=t.charCodeAt(i)}
+  w(0,'RIFF');dv.setUint32(4,36+n,true);w(8,'WAVE');w(12,'fmt ');dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,1,true);dv.setUint32(24,8000,true);dv.setUint32(28,8000,true);dv.setUint16(32,1,true);dv.setUint16(34,8,true);w(36,'data');dv.setUint32(40,n,true);
+  for(var i=0;i<n;i++)b[44+i]=128;   // digital silence: keeps the page alive but plays no sound at all
+  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}))}
+function keepAlive(on){
+  try{
+    if(on){if(!kaEl){kaEl=new Audio(silentWav());kaEl.loop=true}kaEl.play().catch(function(){});
+      if('mediaSession' in navigator)navigator.mediaSession.metadata=new MediaMetadata({title:'Sharing your location',artist:'Activity Tracker'})}
+    else if(kaEl){kaEl.pause()}
+  }catch(e){}
+}
 
 /* ---- sending my position ---- */
 function send(pos){
@@ -1433,7 +1485,7 @@ function api(req, res, id, action, u) {
     if (u.searchParams.get('format') === 'csv') {
       const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
       const lines = ['Time,Person,What happened,Purpose,Location status,Event,Checkpoint,Nearest checkpoint,Distance to nearest (m),Closer by (m),Moved (m),Total (m),Accuracy (m),Latitude,Longitude'];
-      for (const e of ev.log) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.text || e.type), q(e.purpose), q(e.status), q(e.type), q(e.checkpoint), q(e.nearest),
+      for (const e of (roleOf(ev, t) === 'viewer' ? ev.log.filter(x => !VIEWER_HIDDEN.has(x.type)) : ev.log)) lines.push([q(new Date(e.ts).toISOString()), q(e.person), q(e.text || e.type), q(e.purpose), q(e.status), q(e.type), q(e.checkpoint), q(e.nearest),
         e.nearDist == null ? '' : e.nearDist, e.toward == null ? '' : e.toward, e.moved, e.total, e.acc == null ? '' : e.acc, e.lat, e.lng].join(','));
       res.writeHead(200, {
         'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store',
@@ -1441,10 +1493,25 @@ function api(req, res, id, action, u) {
       });
       return res.end(lines.join('\n'));
     }
-    return json(res, 200, { log: ev.log, checkpoints: pubCps(ev) });
+    const lg = roleOf(ev, t) === 'viewer' ? ev.log.filter(e => !VIEWER_HIDDEN.has(e.type)) : ev.log;
+    return json(res, 200, { log: lg, checkpoints: pubCps(ev) });
   }
 
   // host only: log that a flight / person called in on the radio
+  // host only: remove a flight / profile from the roster and map (its log rows stay for the record)
+  if (action === 'remove' && m === 'POST') {
+    if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
+    return readJson(req, (err, b) => {
+      if (err) return json(res, 400, { error: 'bad json' });
+      const pid = String((b && b.pid) || '');
+      const p = ev.people.get(pid);
+      if (!p) return json(res, 404, { error: 'unknown person' });
+      ev.people.delete(pid); ev.last = Date.now(); dirty = true;
+      broadcast(ev, 'removed', { pid }, true);
+      json(res, 200, { ok: true });
+    });
+  }
+
   if (action === 'callin' && m === 'POST') {
     if (!tokenOk(ev, t)) return json(res, 403, { error: 'forbidden' });
     return readJson(req, (err, b) => {
@@ -1544,7 +1611,7 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints|viewlink|callin))?$/))) return api(req, res, r[1], r[2], u);
+  if ((r = p.match(/^\/api\/e\/([a-z2-9]{8})(?:\/(stream|loc|stop|log|checkpoints|viewlink|callin|remove))?$/))) return api(req, res, r[1], r[2], u);
 
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('Not found');
