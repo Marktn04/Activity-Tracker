@@ -26,7 +26,7 @@ let dirty = false;
  * spot with "Edit spots" on the host map. Radius = how close counts as "at" the checkpoint. */
 const DEFAULT_CHECKPOINTS = [
   { id: 'drake',    name: 'Drake Stadium',     type: 'FOB Securement',   lat: 34.07165, lng: -118.44842, radius: 90,
-    items: '', source: 'Master map (orange star); ConOps: Final FOB / Mission Debrief' },
+    items: '', source: 'Master map (orange star); ConOps: FOB Securement / Mission Debrief' },
   { id: 'sage',     name: 'Sage Hill',         type: 'FC Retrieval',     lat: 34.07452, lng: -118.45549, radius: 100,
     items: '', source: 'Master map (magenta star); ConOps: Flight Commander Retrieval' },
   { id: 'cto',      name: 'CTO Court',         type: 'Equipment Pickup', lat: 34.07017, lng: -118.44550, radius: 75,
@@ -46,10 +46,10 @@ const PURPOSES = {
     place: 'Sunken Garden', label: 'Ammo cans',
     headline: 'Picking up AMMO CANS',
     operation: 'Operation Color Run',
-    gets: '4 ammo cans',
-    time: '~20 min',
-    what: 'Staff playing "local nationals" make the flight do a PT circuit, then a puzzle: move four colour-coded ammo cans between two boxes in the exact order the clues give (carried at a run, a different cadet for each move). Solving it earns the ammo cans.',
-    done: 'Puzzle solved in the right order, then the flight leaves carrying the ammo cans.'
+    gets: '4 ammo cans (1 per flight)',
+    time: '~15 min',
+    what: 'Staff playing "local nationals" run a PT circuit (about 10 min), then a puzzle (about 5 min): move four colour-coded ammo cans between two boxes in the exact order the clues give, carried at a run, announced out loud, and never the same cadet on two moves in a row. Solving it earns the ammo can.',
+    done: 'Puzzle solved in the right order; the flight leaves carrying its ammo can.'
   },
   cto: {
     place: 'CTO Court', label: 'Med kits',
@@ -57,17 +57,17 @@ const PURPOSES = {
     operation: 'Operation Last-Mile Airdrop',
     gets: '1 training med kit',
     time: '~20 min',
-    what: 'A staff "clinic courier" runs a silent paper-airplane challenge: groups of 4-6 build one plane, one fold each, no talking, then launch it at a 2 m target. When it is done the flight is awarded the med kit.',
+    what: 'A staff "clinic courier" runs a silent paper-airplane challenge: groups of 4-6 build one plane, one fold each, no talking, then launch it at a 2 m x 2 m target. Once every group has built and tested a plane, the flight is awarded the med kit.',
     done: 'Every group built and tested a plane with everyone folding; med kit handed over.'
   },
   sculpt: {
-    place: 'Sculpture Garden', label: 'Rucks & staffs',
-    headline: 'Picking up RUCKSACKS and WOODEN STAFFS',
+    place: 'Sculpture Garden', label: 'Rucks & guidons',
+    headline: 'Picking up RUCKSACKS and GUIDONS',
     operation: 'Operation Interlocked',
-    gets: 'rucksacks + wooden (Huebner) staffs',
+    gets: '1 rucksack (with sandbags) + the flight\'s guidon',
     time: '~25 min',
-    what: 'After a PT circuit, staff playing the "Scubba Tribe" set the "no one left behind" challenge: the whole flight (except the commander, who leads) crosses a course with arms and legs interlocked: 2 minutes to plan, 10 to move. The rucks and staffs are the reward.',
-    done: 'Every cadet crosses the finish line still interlocked; rucks and staffs awarded.'
+    what: 'After a PT circuit, staff playing the "Scubba Tribe" set the "no one left behind" challenge: the whole flight except the commander crosses a course with arms and legs interlocked (2 minutes to plan, 10 to move). The commander leads. The rucks and guidons (stolen by the kidnappers at the start) are the reward.',
+    done: 'Every cadet crosses the finish line still interlocked; rucks and guidons awarded.'
   },
   sage: {
     place: 'Sage Hill', label: 'Rescue Flt/CC',
@@ -75,16 +75,16 @@ const PURPOSES = {
     operation: 'Flight Commander Retrieval',
     gets: 'their Flight Commander + the final base location (Drake Stadium)',
     time: '~25 min',
-    what: 'Flights only get sent here after finishing a THIRD equipment stop. Staff playing the commander\'s old training instructor ("OPFOR") put the flight through a 20-minute "perfect" Open Ranks Inspection plus Warrior Knowledge questions. Pass: the commander is released. Fail: the commander is "shot" in a skit but still reveals the final base.',
+    what: 'Flights are sent here after their third equipment stop (they solve a cipher to find it). Staff playing the commander\'s old training instructor (MTI/"OPFOR") put the flight through a 20-minute "perfect" Open Ranks Inspection. Pass: the commander is released and hands over the final base map. Fail: the commander is "shot" in a skit but still reveals the final base with their last words.',
     done: 'Inspection finished and the commander has told them the final base is Drake Stadium.'
   },
   drake: {
     place: 'Drake Stadium', label: 'Final base',
     headline: 'FINAL BASE: handing in the equipment',
-    operation: 'Final FOB, then Mission Debrief',
+    operation: 'FOB Securement, then Mission Debrief',
     gets: 'safe refuge, but only the FIRST 2 flights are let in',
     time: 'debrief 1010-1030',
-    what: 'Flights bring EVERYTHING they collected (ammo cans, med kit, ruck, wooden staff) to the guard in exchange for refuge. Capacity is two flights; later flights are turned away. After the mission everyone debriefs here. (Drake Stadium is also where the morning formation starts at 0630.)',
+    what: 'Flights bring EVERYTHING they collected (ammo can, med kit, ruck, guidon) to the Entry Control Point guard in exchange for refuge. Capacity is two flights; the last two are turned away. Everyone is then directed to the mission debrief. Flights that haven\'t started toward the final base by 1000 are walked here for the debrief. (Drake Stadium is also where the 0630 formation starts.)',
     done: 'All four items handed in (first two flights win); later, the flight debriefs.'
   }
 };
@@ -94,43 +94,49 @@ const MISSION_GUIDE = {
   title: 'LLAB 9: Operation Change of Command (20 Nov 2026)',
   sections: [
     { h: 'The story in 30 seconds', items: [
-      'The Flight Commanders (Flt/CCs) have been "kidnapped" by pretend enemy staff. Each flight, now led by its Deputy Flight Commander, must get its commander back and reach the final base.',
-      'To be let into the final base each flight must carry four items: an ammo can, a med kit, a rucksack and a wooden staff.',
+      'During the morning formation at Drake Stadium the Flight Commanders (Flt/CCs) get "kidnapped" by pretend enemy staff, who also steal each flight\'s guidon. Each flight, now led by its Deputy Flight Commander, must get its commander back and reach the final base.',
+      'To be let into the final base each flight must carry four items: an ammo can, a med kit, a rucksack and its guidon.',
       'The items are held by staff playing "local nationals" at three stations. Flights earn each item by completing a short challenge there.',
       'Only the first 2 flights to reach the final base are let in. The mission is a race as well as a task.'
     ]},
+    { h: 'Reading this app', items: [
+      'Each dot is one FLIGHT (Alpha, Bravo, Charlie, Delta), tracked by its Deputy Flight Commander\'s phone.',
+      'The red/green 📻 button shows whether Base Command has had an accountability radio call from that flight at its current stop. It resets to red when the flight leaves the circle.',
+      'The progress button (e.g. 2/5) lists which of the five stops a flight has reached.'
+    ]},
     { h: 'The five stops (what each marker on the map means)', items: [
-      'Sunken Garden (S): AMMO CANS (Operation Color Run), about 20 min.',
+      'Sunken Garden (S): AMMO CANS (Operation Color Run), about 15 min.',
       'CTO Court: MED KITS (Operation Last-Mile Airdrop), about 20 min.',
-      'Sculpture Garden: RUCKSACKS + WOODEN STAFFS (Operation Interlocked), about 25 min.',
-      'Sage Hill: RESCUE THE FLIGHT COMMANDER (perfect inspection), about 25 min. Flights are only told about this location after their 3rd equipment stop.',
-      'Drake Stadium: FINAL BASE. Hand in all four items. Only 2 flights fit. Also where the mission debrief happens.'
+      'Sculpture Garden: RUCKSACKS + GUIDONS (Operation Interlocked), about 25 min.',
+      'Sage Hill: RESCUE THE FLIGHT COMMANDER (perfect inspection), about 25 min. Flights are only sent here after their 3rd equipment stop.',
+      'Drake Stadium: FINAL BASE. Hand in all four items to the ECP guard. Only 2 flights fit. Also where the mission debrief happens.'
     ]},
     { h: 'What a normal flight looks like on your map', items: [
-      'Visits Sunken Garden, CTO Court and Sculpture Garden in any order (all three equipment stops).',
+      'Visits Sunken Garden, CTO Court and Sculpture Garden in any order (the three equipment stops, each 15-25 min).',
       'Then Sage Hill (rescue), then Drake Stadium (final base).',
-      'Fastest walking route is about 65 minutes: CTO, Sunken, Sculpture, Sage Hill, Drake (about 3 miles). Flights are told to double-time between stops, and each stop takes about 20 minutes.',
+      'Fastest walking route is about 65 minutes: CTO, Sunken, Sculpture, Sage Hill, Drake (about 3 miles). The slowest sensible route is about 75 minutes (Sunken, CTO, Sculpture, ...). Flights double-time between stops.',
       'A flight at Sage Hill with fewer than three equipment stops visited, or at Drake without Sage Hill, is out of the expected order. The log flags this in its Purpose line.'
     ]},
     { h: 'Why a flight might be somewhere unexpected', items: [
       'Each flight\'s map shows only 2 of the 3 equipment stops (Alpha and Charlie: Sunken + CTO. Bravo and Delta: Sunken + Sculpture). They must radio other flights to find the third.',
-      'Flights that are far ahead of schedule may be redirected by a planned "inject" to Anderson Court, Inverted Fountain or Court of Sciences. Those are not marked on this map.',
-      'Some flights contain a planted "mole" who may try to steer them wrong or stall.'
+      'At the third equipment stop the Deputy Flight Commander gives the flight a cipher puzzle (Inject 2). Solving it earns the FC map that points to Sage Hill.',
+      'Some flights contain a planted "mole" (Inject 1) who may try to steer them wrong or stall.'
     ]},
-    { h: 'Accountability rules for the tracker (Base Command)', items: [
+    { h: 'Accountability rules (Base Command)', items: [
       'Order of precedence: SAFETY, then ACCOUNTABILITY, then MISSION, then TIMELINE.',
-      'Flights report their location and destination by radio when moving between stations. Base Command is radio Channel 10 (Flights A to D use Channels 1 to 4).',
-      'Base Command (C/Tran, at the SAC) monitors this app, keeps the accountability spreadsheet, and tells the Deputy Flight Commanders about discrepancies, unaccounted-for personnel or flights that cannot be found.'
+      'Flights must radio when they START transiting and when they ARRIVE. Each call gives current location, intended destination and accountability ("X out of X present").',
+      'Base Command is radio Channel 10; Alpha to Delta use Channels 1 to 4. Base Command (C/Tran, Cadet Lounge at the SAC) monitors this app, keeps the accountability spreadsheet and tells Deputy Flight Commanders about discrepancies, unaccounted-for personnel or flights that cannot be found.',
+      'Deputy Flight Commanders keep the tracker open with the screen on and never tap Stop. At the final base they hand their phone to a POC proctor.'
     ]}
   ],
   timeline: [
     ['0600-0620', 'POC dry run at SAC steps'],
-    ['0630-0645', 'Opening formation at Drake Stadium'],
-    ['0645-0705', 'Kidnapping skit, then everyone runs to the SAC'],
-    ['0705-0730', 'Mission brief in the SAC classrooms; flights get their map and radio'],
+    ['0630-0645', 'Opening formation and reveille at Drake Stadium'],
+    ['0645-0705', 'Kidnapping skit, then everyone runs to the SAC (arrive 0655-0705)'],
+    ['0705-0730', 'Mission brief in the SAC classrooms; flights get their map, WARNORD and radio'],
     ['0730-0900', 'Equipment pickups (Sunken Garden, CTO Court, Sculpture Garden): about 80-90 min'],
     ['0850-0955', 'Flight Commander retrieval at Sage Hill: about 45-55 min'],
-    ['by 1010',   'Final base at Drake Stadium (first 2 flights win)'],
+    ['0935-1010', 'FOB securement at Drake Stadium: first 2 flights in, 15-25 min transit'],
     ['1010-1030', 'Mission debrief at Drake Stadium'],
     ['1040-1050', 'Closing formation and retreat at Drake Stadium']
   ]
@@ -1143,7 +1149,7 @@ h1{margin:0;font-size:20px;font-weight:600;color:#cbd5e1}
 </head><body>
 <div id="home">
   <h1 id="ev">&nbsp;</h1>
-  <input id="name" placeholder="Your name" maxlength="40" autocomplete="given-name">
+  <input id="name" placeholder="Flight name (e.g. Alpha)" maxlength="40" autocomplete="off">
   <button id="go" disabled>Share<br>location</button>
   <div id="st"></div>
   <button id="stop" class="hidden">Stop sharing</button>
@@ -1235,7 +1241,7 @@ function startSharing(auto){
   sharing=true; lsSet('at_sharing_'+ID,'1');
   $('go').classList.add('on'); $('go').innerHTML='Sharing<br>live'; $('go').disabled=true;
   $('stop').classList.remove('hidden'); $('name').classList.add('hidden');
-  $('note').textContent='Keep this app open. For best results leave the screen on (you can dim it). Locking your phone can pause sharing.';
+  $('note').textContent='Keep this app open with the screen on (you can dim it). Do NOT tap Stop: it ends sharing immediately and Base Command will know.';
   status(auto?'Resuming...':'Getting your location...');
   watch(); getWake(); keepAlive(true);
   clearInterval(hb);
