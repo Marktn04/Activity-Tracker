@@ -244,6 +244,8 @@ function pub(p, host, ev) {
     o.visits = p.visits || {};
     o.where = ev ? statusText(ev, p, null) : '';
     o.acct = !!p.acct;
+    o.fob = p.fobRank || 0;
+    o.due = p.callDue || 0;
     o.call = p.lastCall || 0;   // last radio call-in (host / view-only only)
     o.doing = ev ? doingText(ev, p) : '';   // purpose: HOST / VIEW-ONLY ONLY, never in the participant payload
   }
@@ -267,6 +269,7 @@ function purposeNote(ev, p, type, cpId) {
   if (type === 'Call-in') return '';
   if (!cpId || !PURPOSES[cpId]) return '';
   let s = purposeFor(cpId, p);
+  if (type === 'Arrived' && cpId === 'drake' && p.fobRank) s += '. FINAL BASE: ' + (p.fobRank <= 2 ? 'flight #' + p.fobRank + ' to arrive, ALLOWED IN (mission success)' : 'flight #' + p.fobRank + ' to arrive, DENIED ENTRY (only 2 fit)');
   const vs = p.visits || {};
   const eq = EQUIP_IDS.filter(i => vs[i]).length;
   if (type === 'Arrived') {
@@ -369,6 +372,12 @@ function logRow(ev, p, type, moved, checkpointId, tsOverride) {
   };
   if (type === 'Arrived') entry.visit = (p.visits && p.visits[cpId] && p.visits[cpId].count) || 1;
   if (type === 'Left') { entry.reset = !!p.acct; p.acct = false; }   // leaving the circle resets accountability
+  const inMission = ['sunken', 'cto', 'sculpt', 'sage'].some(i => p.visits && p.visits[i]);
+  if ((type === 'Left' || type === 'Arrived') && inMission) p.callDue = entry.ts;   // a radio call is now owed
+  if (type === 'Arrived' && cpId === 'drake' && p.visits && p.visits.sage && !p.fobRank) {   // reached the final base after the rescue
+    let n = 0; for (const q of ev.people.values()) if (q.fobRank) n++;
+    p.fobRank = n + 1; p.fobTs = entry.ts;
+  }
   entry.status = statusText(ev, p, type, entry.checkpoint);
   entry.purpose = purposeNote(ev, p, type, cpId);   // host / view-only only (the log is never sent to participants)
   entry.text = eventText(type, entry);
@@ -637,8 +646,9 @@ ${BASE_CSS}
 .pc .cb,.pc .ac{font-weight:700;white-space:nowrap}
 .pc .ac{flex:none;font-size:12px;padding:2px 8px;border-radius:10px;border:1px solid}
 .pc .ok{background:#14532d;border-color:#22c55e;color:#bbf7d0}
+.pc .od{background:#7c2d12;border-color:#f97316;color:#fed7aa}
 .pc .no{background:#7f1d1d;border-color:#ef4444;color:#fecaca}
-.pc.acctno{border-left-color:#ef4444!important}.pc.acctok{border-left-color:#22c55e!important}
+.pc.acctod{border-left-color:#f97316!important}.pc.acctno{border-left-color:#ef4444!important}.pc.acctok{border-left-color:#22c55e!important}
 .pc .pdo{margin:5px 0 0 22px;font-size:13px;color:#ddd6fe;font-weight:600}
 .cpop .pup{margin-top:8px;padding-top:7px;border-top:1px solid #e2e8f0}.cpop .ph{font-weight:800;font-size:14px;color:#5b21b6}
 #guidep{position:absolute;inset:0;z-index:3000;background:#0f172a;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
@@ -805,7 +815,7 @@ function upsert(d,appendPt,trail){
     p.line=L.polyline(p.trail,{color:color(d.pid),weight:4,opacity:.7});
     if(showTrails)p.line.addTo(map);
   } else if(trail){p.trail=trail;p.line.setLatLngs(trail)}
-  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;p.acct=!!d.acct;
+  p.name=d.name;p.lat=d.lat;p.lng=d.lng;p.acc=d.acc;p.ts=d.ts;p.stopped=d.stopped;p.cp=d.cp||null;p.lost=!!d.lost;p.visits=d.visits||{};p.where=d.where||'';p.total=d.total||0;p.doing=d.doing||'';p.call=d.call||0;p.acct=!!d.acct;p.fob=d.fob||0;p.due=d.due||0;
   if(appendPt){p.trail.push([d.lat,d.lng]);if(p.trail.length>MAXT)p.trail.shift();p.line.setLatLngs(p.trail)}
   p.marker.setLatLng([d.lat,d.lng]); p.marker.setIcon(iconFor(p));
 }
@@ -1010,6 +1020,7 @@ function fit(){
 var rq=0;
 function render(){ if(rq)return; rq=requestAnimationFrame(function(){rq=0;draw()}) }
 var LOSTS=120;
+function overdue(p){return !!(p.due&&(p.call||0)<p.due&&age(p.due)>180)}
 function pstate(p){if(p.stopped)return 'stopped';if(p.lost||age(p.ts)>LOSTS)return 'lost';return p.cp?'at':'enroute'}
 function draw(){
   var ids=Object.keys(people),rank={lost:0,at:1,enroute:1,stopped:2},n={at:0,enroute:0,lost:0,stopped:0};
@@ -1017,7 +1028,8 @@ function draw(){
   // problems first, finished last, everyone else A-Z (stable, so the list doesn't jump around)
   ids.sort(function(a,b){var A=people[a],B=people[b];return (rank[pstate(A)]-rank[pstate(B)])||String(A.name).localeCompare(String(B.name))});
   $('cnt').textContent=' · '+(n.at+n.enroute)+' live'+(n.lost?' · '+n.lost+' no signal':'');
-  $('shl').textContent=ids.length+' people'+(n.at?' · '+n.at+' at a checkpoint':'')+(n.lost?' · '+n.lost+' NO SIGNAL':'');
+  var nod=ids.filter(function(k){return overdue(people[k])&&pstate(people[k])!=='stopped'}).length;
+  $('shl').textContent=ids.length+' people'+(n.at?' · '+n.at+' at a checkpoint':'')+(n.lost?' · '+n.lost+' NO SIGNAL':'')+(nod?' · '+nod+' RADIO OVERDUE':'');
   var box=$('list'); box.innerHTML='';
   if(!ids.length){var e=document.createElement('div');e.className='empty';e.textContent='Nobody yet. Tap "Share link" and send it to your group.';box.appendChild(e)}
   ids.forEach(function(k){
@@ -1029,7 +1041,8 @@ function draw(){
     var bd=document.createElement('span');bd.className='bd';
     bd.textContent=st==='at'?'At '+cpNameOf(p.cp):st==='enroute'?'En route':st==='lost'?'No signal '+agoTxt(age(p.ts)).replace(' ago',''):'Stopped sharing';
     top.appendChild(c);top.appendChild(nm);top.appendChild(bd);
-    var acs=st==='stopped'?'':(p.acct?'ok':'no'), atxt=p.acct?'\u2713 Accounted':'\u2717 Not accounted';
+    var od=overdue(p)&&st!=='stopped';
+    var acs=st==='stopped'?'':(od?'od':(p.acct?'ok':'no')), atxt=od?'\u26A0 Radio overdue '+Math.floor(age(p.due)/60)+'m':(p.acct?'\u2713 Accounted':'\u2717 Not accounted');
     if(acs){
       if(!VIEW){var cb=document.createElement('button');cb.className='cb '+acs;cb.textContent='\uD83D\uDCFB '+atxt;cb.title='Tap when the flight radios in: everyone accounted for';
         cb.onclick=function(e){e.stopPropagation();cb.disabled=true;
@@ -1041,6 +1054,7 @@ function draw(){
     if(cpData.length){var nd=0;cpData.forEach(function(cp){if(p.visits&&p.visits[cp.id])nd++});
       var pg=document.createElement('button');pg.className='pg'+(nd===cpData.length?' all':'');pg.textContent='\u2713 '+nd+'/'+cpData.length;pg.title='Flight progress';
       pg.onclick=function(e){e.stopPropagation();showProg(k)};top.appendChild(pg)}
+    if(p.fob){var fb=document.createElement('span');fb.className='ac '+(p.fob<=2?'ok':'no');fb.textContent=p.fob===1?'FOB 1st in \u2713':p.fob===2?'FOB 2nd in \u2713':'FOB denied \u2717';top.appendChild(fb)}
     r.appendChild(top);
     var w=document.createElement('div');w.className='pw';
     w.textContent=(st==='lost'?'Last seen '+agoTxt(age(p.ts)):'Updated '+agoTxt(age(p.ts)))+(p.where?' · '+p.where:'')+(p.total?' · '+p.total+' m walked':'')+(p.call?' · last radio call '+agoTxt(age(p.call)):' · no radio call yet');
